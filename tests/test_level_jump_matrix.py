@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from services.level_service import build_account_jump_matrix
+from services.level_service import build_account_jump_matrix, build_multi_account_upgrade_plan
 
 
 LEVEL_CONFIG = {
@@ -46,6 +46,25 @@ class LevelJumpMatrixTest(unittest.TestCase):
         row = matrix["rows"][0]
         self.assertEqual(row["Max Jump Level"], 1)
         self.assertIn("No resource snapshot found", row["Status"])
+
+    def test_multi_account_plan_outputs_moves_and_detail(self) -> None:
+        snapshots = [
+            {"account_id": "a1", "gold": 300, "shards": 30, "wf": 10},
+            {"account_id": "a2", "gold": 300, "shards": 30, "wf": 5},
+        ]
+        plan = build_multi_account_upgrade_plan(
+            ACCOUNTS[:2],
+            snapshots,
+            [{"unit_name": "Rogue", "current_level": 1, "target_level": 4}],
+            LEVEL_CONFIG,
+            mode="Best Fit / Least Waste",
+        )
+        self.assertEqual(plan["summary"]["required_shards"], 60)
+        self.assertEqual(plan["summary"]["required_golds"], 600)
+        self.assertTrue(plan["summary"]["enough_resource"])
+        self.assertGreaterEqual(len(plan["recommended_moves"]), 1)
+        self.assertEqual(len(plan["allocation_detail"]), 3)
+        self.assertEqual(plan["unit_summary"][0]["Max Reached"], 4)
 
 
 if __name__ == "__main__":

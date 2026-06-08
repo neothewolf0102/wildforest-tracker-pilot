@@ -2,6 +2,23 @@
 
 Super admin email: `firmstoney@gmail.com`.
 
+The admin must sign in with Gmail. There is no separate admin password.
+
+## Storage Model
+
+Pilot storage remains split by responsibility:
+
+- User game data: stored under each pilot user's own storage boundary.
+- Admin access control and admin logs: stored through the signed-in super admin storage boundary.
+
+When `firmstoney@gmail.com` is signed in and the app is using Google Drive storage, these files are saved in that admin-owned Drive app folder:
+
+- `admin/access_control.json`
+- `admin/audit_logs.json`
+- `admin/system_errors.json`
+
+No secrets, OAuth tokens, client secrets, or `.env` files should be written to these logs.
+
 ## User Access
 
 The super admin panel can:
@@ -37,8 +54,8 @@ Recommended notifications for the super admin:
 - A session exceeds expected daily usage, for example more than 8 hours.
 - A user approaches Pilot account capacity.
 
-## Storage Note
+## Production Note
 
-User game data remains scoped to each pilot user's storage boundary. Admin audit data is intentionally minimal and should not include user secrets or OAuth tokens.
+Google Drive admin-owned storage is the recommended Pilot 01 storage path because it matches the Gmail/Drive model and avoids operating a database too early.
 
-For production durability across Streamlit restarts/redeploys, replace the current runtime admin cache with a durable admin-owned Google Drive folder or database-backed audit store.
+If the pilot grows beyond light usage or needs stronger query/reporting guarantees, migrate these admin files to a managed database such as Postgres/Supabase. Do not use local Streamlit filesystem storage for durable admin records.

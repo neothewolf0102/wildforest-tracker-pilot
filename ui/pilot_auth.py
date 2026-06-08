@@ -7,6 +7,7 @@ from services.admin_service import (
     ALLOW_MODE_CLOSED,
     ALLOW_MODE_OPEN,
     SUPER_ADMIN_EMAIL,
+    configure_admin_store,
     get_access_state,
     get_audit_logs,
     get_system_logs,
@@ -55,6 +56,8 @@ def current_user_email() -> str:
 def render_login_gate() -> bool:
     if SESSION_USER in st.session_state:
         email = current_user_email()
+        if is_super_admin(email):
+            configure_admin_store(current_store())
         if not is_email_allowed(email):
             log_event(email, "Access", "blocked", "User is blocked or not allowlisted.")
             st.error("Your Gmail is not active for this pilot. Please contact the pilot admin.")
@@ -75,6 +78,12 @@ def render_login_gate() -> bool:
         preview_email = st.text_input("Pilot preview Gmail", value="pilot-preview@example.com")
         if st.button("Start pilot preview", type="primary"):
             email = preview_email.strip().lower()
+            if email == SUPER_ADMIN_EMAIL:
+                st.session_state[SESSION_USER] = {"email": email, "drive_folder_name": "Wildforest Tracker Admin"}
+                st.session_state[SESSION_STORE] = SessionJsonStore(namespace=email)
+                configure_admin_store(st.session_state[SESSION_STORE])
+                log_event(email, "Access", "admin_preview_login", "Super admin preview session started")
+                st.rerun()
             if not is_email_allowed(email):
                 log_event(email, "Access", "blocked_preview", "Blocked preview login attempt")
                 st.error("This Gmail is not active for this pilot.")
@@ -91,6 +100,8 @@ def render_login_gate() -> bool:
 def render_user_bar() -> None:
     user = st.session_state.get(SESSION_USER, {})
     email = current_user_email()
+    if is_super_admin(email):
+        configure_admin_store(current_store())
     left, right = st.columns([3, 1])
     with left:
         role = "Super Admin" if is_super_admin(email) else "Pilot User"
@@ -107,7 +118,7 @@ def render_user_bar() -> None:
 
 def render_super_admin_panel() -> None:
     with st.expander("Super Admin", expanded=False):
-        st.caption(f"Only {SUPER_ADMIN_EMAIL} can see this panel.")
+        st.caption(f"Only {SUPER_ADMIN_EMAIL} can see this panel. Admin config/log files are saved through the signed-in admin storage boundary.")
         access_tab, usage_tab, errors_tab, notify_tab = st.tabs(["Access", "Usage Logs", "System Errors", "Notifications"])
 
         with access_tab:
@@ -171,4 +182,4 @@ def render_super_admin_panel() -> None:
             st.markdown("#### Recommended admin notifications")
             for item in notification_recommendations():
                 st.write(f"- {item}")
-            st.info("Next production step: wire these notification triggers to email/Telegram/Discord once the admin storage backend is finalized.")
+            st.info("Production notification delivery can be wired to email, Telegram, Discord, or Google Chat after you choose the channel.")

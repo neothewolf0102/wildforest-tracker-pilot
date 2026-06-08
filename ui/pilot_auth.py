@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import secrets as py_secrets
+
 import pandas as pd
 import streamlit as st
 
+from adapters.google_drive_adapter import GoogleDriveRestClient
+from adapters.google_oauth_adapter import exchange_auth_code, fetch_google_user
 from services.admin_service import (
     ALLOW_MODE_CLOSED,
     ALLOW_MODE_OPEN,
@@ -20,10 +24,12 @@ from services.admin_service import (
     set_email_access,
 )
 from services.auth_service import GOOGLE_DRIVE_FILE_SCOPE, OPENID_SCOPES, GoogleOAuthConfig, build_google_login_url, validate_minimum_drive_scope
+from services.google_drive_service import DriveJsonStore, build_drive_user_context
 from services.session_store import SessionJsonStore
 
 SESSION_USER = "wf_user"
 SESSION_STORE = "wf_store"
+SESSION_OAUTH_STATE = "wf_oauth_state"
 
 
 def parse_scopes(value: object) -> tuple[str, ...]:
@@ -42,7 +48,13 @@ def oauth_config_from_secrets() -> GoogleOAuthConfig:
     )
 
 
-def current_store() -> SessionJsonStore:
+def app_folder_name_from_secrets(email: str) -> str:
+    if is_super_admin(email):
+        return str(st.secrets.get("APP_ADMIN_DRIVE_FOLDER_NAME", "Wildforest Tracker Admin"))
+    return str(st.secrets.get("APP_DRIVE_FOLDER_NAME", "Wildforest Tracker"))
+
+
+def current_store():
     if SESSION_STORE not in st.session_state:
         st.session_state[SESSION_STORE] = SessionJsonStore(namespace=current_user_email() or "pilot-local")
     return st.session_state[SESSION_STORE]
@@ -51,6 +63,42 @@ def current_store() -> SessionJsonStore:
 def current_user_email() -> str:
     user = st.session_state.get(SESSION_USER, {})
     return str(user.get("email", "")) if isinstance(user, dict) else ""
+
+
+def handle_google_callback() -> bool:
+    params = st.query_params
+    code = params.get("code")
+    state = params.get("state")
+    if not code:
+        return False
+    expected_state = st.session_state.get(SESSION_OAUTH_STATE)
+    if expected_state and state != expected_state:
+        st.error("Google login failed because OAuth state did not match.")
+        return False
+    config = oauth_config_from_secrets()
+    token_set = exchange_auth_code(config, str(st.secrets.get("GOOGLE_CLIENT_SECRET", "")), str(code))
+    google_user = fetch_google_user(token_set.access_token)
+    email = google_user.email.strip().lower()
+    if not is_email_allowed(email):
+        log_event(email, "Access", "blocked_google_login", "Blocked Google login attempt")
+        st.error("This Gmail is not active for this pilot.")
+        return False
+    client = GoogleDriveRestClient(token_set.access_token)
+    context = build_drive_user_context(google_user, token_set.access_token, client, app_folder_name_from_secrets(email))
+    st.session_state[SESSION_USER] = {
+        "email": email,
+        "display_name": google_user.display_name,
+        "user_id": google_user.user_id,
+        "drive_folder_name": context.folder_name,
+        "drive_folder_id": context.root_folder_id,
+    }
+    st.session_state[SESSION_STORE] = DriveJsonStore(client=client, context=context)
+    if is_super_admin(email):
+        configure_admin_store(st.session_state[SESSION_STORE])
+    log_event(email, "Access", "google_login", "Google OAuth login completed")
+    st.query_params.clear()
+    st.rerun()
+    return True
 
 
 def render_login_gate() -> bool:
@@ -64,34 +112,40 @@ def render_login_gate() -> bool:
             return False
         log_event(email, "Session", "page_view", "App rerun/page view")
         return True
+
+    if handle_google_callback():
+        return False
+
     st.title("Wildforest Tracker")
-    st.caption("Pilot 01 web app. Configure Google OAuth in Streamlit secrets before external pilot use.")
+    st.caption("Pilot 01 web app. Sign in with Gmail. User data is stored in that user's Google Drive app folder.")
     try:
         config = oauth_config_from_secrets()
         if not validate_minimum_drive_scope(config.scopes):
             st.error("GOOGLE_SCOPES must include https://www.googleapis.com/auth/drive.file")
             return False
-        if config.client_id and config.redirect_uri:
-            st.link_button("Login with Google", build_google_login_url(config, state="pilot01"), type="primary")
+        if config.client_id and config.redirect_uri and st.secrets.get("GOOGLE_CLIENT_SECRET", ""):
+            state = py_secrets.token_urlsafe(24)
+            st.session_state[SESSION_OAUTH_STATE] = state
+            st.link_button("Login with Google", build_google_login_url(config, state=state), type="primary")
         else:
             st.info("Google OAuth secrets are not configured yet. Using local pilot preview session.")
-        preview_email = st.text_input("Pilot preview Gmail", value="pilot-preview@example.com")
-        if st.button("Start pilot preview", type="primary"):
-            email = preview_email.strip().lower()
-            if email == SUPER_ADMIN_EMAIL:
-                st.session_state[SESSION_USER] = {"email": email, "drive_folder_name": "Wildforest Tracker Admin"}
+            preview_email = st.text_input("Pilot preview Gmail", value="pilot-preview@example.com")
+            if st.button("Start pilot preview", type="primary"):
+                email = preview_email.strip().lower()
+                if email == SUPER_ADMIN_EMAIL:
+                    st.session_state[SESSION_USER] = {"email": email, "drive_folder_name": "Wildforest Tracker Admin"}
+                    st.session_state[SESSION_STORE] = SessionJsonStore(namespace=email)
+                    configure_admin_store(st.session_state[SESSION_STORE])
+                    log_event(email, "Access", "admin_preview_login", "Super admin preview session started")
+                    st.rerun()
+                if not is_email_allowed(email):
+                    log_event(email, "Access", "blocked_preview", "Blocked preview login attempt")
+                    st.error("This Gmail is not active for this pilot.")
+                    return False
+                st.session_state[SESSION_USER] = {"email": email, "drive_folder_name": "Wildforest Tracker"}
                 st.session_state[SESSION_STORE] = SessionJsonStore(namespace=email)
-                configure_admin_store(st.session_state[SESSION_STORE])
-                log_event(email, "Access", "admin_preview_login", "Super admin preview session started")
+                log_event(email, "Access", "login", "Preview session started")
                 st.rerun()
-            if not is_email_allowed(email):
-                log_event(email, "Access", "blocked_preview", "Blocked preview login attempt")
-                st.error("This Gmail is not active for this pilot.")
-                return False
-            st.session_state[SESSION_USER] = {"email": email, "drive_folder_name": "Wildforest Tracker"}
-            st.session_state[SESSION_STORE] = SessionJsonStore(namespace=email)
-            log_event(email, "Access", "login", "Preview session started")
-            st.rerun()
     except Exception as error:
         st.error(f"Google login is not configured: {error}")
     return False
@@ -111,6 +165,7 @@ def render_user_bar() -> None:
             log_event(email, "Access", "logout", "User logged out")
             st.session_state.pop(SESSION_USER, None)
             st.session_state.pop(SESSION_STORE, None)
+            st.session_state.pop(SESSION_OAUTH_STATE, None)
             st.rerun()
     if is_super_admin(email):
         render_super_admin_panel()
@@ -124,12 +179,7 @@ def render_super_admin_panel() -> None:
         with access_tab:
             state = get_access_state()
             mode_label = "Open except blocked" if state.get("mode") == ALLOW_MODE_OPEN else "Allowlist only"
-            selected_mode = st.radio(
-                "Pilot access mode",
-                ["Open except blocked", "Allowlist only"],
-                index=0 if mode_label == "Open except blocked" else 1,
-                horizontal=True,
-            )
+            selected_mode = st.radio("Pilot access mode", ["Open except blocked", "Allowlist only"], index=0 if mode_label == "Open except blocked" else 1, horizontal=True)
             next_mode = ALLOW_MODE_OPEN if selected_mode == "Open except blocked" else ALLOW_MODE_CLOSED
             if next_mode != state.get("mode"):
                 set_access_mode(next_mode)
@@ -150,11 +200,7 @@ def render_super_admin_panel() -> None:
                 st.warning("Gmail deactivated.")
                 st.rerun()
 
-            access_rows = [
-                {"status": "allowed", "email": item} for item in get_access_state().get("allowed_emails", [])
-            ] + [
-                {"status": "blocked", "email": item} for item in get_access_state().get("blocked_emails", [])
-            ]
+            access_rows = [{"status": "allowed", "email": item} for item in get_access_state().get("allowed_emails", [])] + [{"status": "blocked", "email": item} for item in get_access_state().get("blocked_emails", [])]
             st.dataframe(pd.DataFrame(access_rows), use_container_width=True, hide_index=True)
 
         with usage_tab:

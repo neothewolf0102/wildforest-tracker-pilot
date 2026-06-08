@@ -36,6 +36,13 @@ def ensure_wildforest_drive_folder(client: DriveClient, folder_name: str = WILDF
     return client.create_folder(folder_name)
 
 
+def ensure_child_folder(client: DriveClient, parent_id: str, folder_name: str) -> str:
+    existing_id = client.find_folder(folder_name, parent_id=parent_id)
+    if existing_id:
+        return existing_id
+    return client.create_folder(folder_name, parent_id=parent_id)
+
+
 def build_drive_user_context(user: AuthenticatedUser, access_token: str, client: DriveClient, folder_name: str = WILDFOREST_DRIVE_FOLDER_NAME) -> DriveUserContext:
     if not access_token:
         raise ValueError("Google Drive access token is required.")
@@ -48,17 +55,30 @@ class DriveJsonStore:
     client: DriveClient
     context: DriveUserContext
 
+    def _resolve_path(self, filename: str) -> tuple[str, str]:
+        parts = [part for part in filename.replace("\\", "/").split("/") if part]
+        if not parts:
+            raise ValueError("Filename is required.")
+        folder_id = self.context.root_folder_id
+        for folder_name in parts[:-1]:
+            folder_id = ensure_child_folder(self.client, folder_id, folder_name)
+        return folder_id, parts[-1]
+
     def load_json(self, filename: str, default=None):
-        text = self.client.read_text_file(self.context.root_folder_id, filename)
+        folder_id, leaf_name = self._resolve_path(filename)
+        text = self.client.read_text_file(folder_id, leaf_name)
         if not text.strip():
             return default if default is not None else []
         return json.loads(text)
 
     def save_json(self, filename: str, data) -> str:
-        return self.client.upsert_text_file(self.context.root_folder_id, filename, json.dumps(data, ensure_ascii=False, indent=2))
+        folder_id, leaf_name = self._resolve_path(filename)
+        return self.client.upsert_text_file(folder_id, leaf_name, json.dumps(data, ensure_ascii=False, indent=2))
 
     def save_report_text(self, filename: str, content: str) -> str:
-        return self.client.upsert_bytes_file(self.context.root_folder_id, f"reports/{filename}", content.encode("utf-8"), "text/csv; charset=utf-8")
+        folder_id, leaf_name = self._resolve_path(f"reports/{filename}")
+        return self.client.upsert_bytes_file(folder_id, leaf_name, content.encode("utf-8"), "text/csv; charset=utf-8")
 
     def save_report_bytes(self, filename: str, content: bytes, mime_type: str) -> str:
-        return self.client.upsert_bytes_file(self.context.root_folder_id, f"reports/{filename}", content, mime_type)
+        folder_id, leaf_name = self._resolve_path(f"reports/{filename}")
+        return self.client.upsert_bytes_file(folder_id, leaf_name, content, mime_type)

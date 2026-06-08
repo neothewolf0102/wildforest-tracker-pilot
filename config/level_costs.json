@@ -1,0 +1,25 @@
+{
+  "placeholder": true,
+  "warning": "Level cost table is using placeholder values. Please configure real Wildforest level costs before production use.",
+  "level_costs": [
+    {"level": 2, "gold": 120, "shards": 2},
+    {"level": 3, "gold": 180, "shards": 3},
+    {"level": 4, "gold": 260, "shards": 4},
+    {"level": 5, "gold": 360, "shards": 5},
+    {"level": 6, "gold": 480, "shards": 7},
+    {"level": 7, "gold": 620, "shards": 9},
+    {"level": 8, "gold": 780, "shards": 11},
+    {"level": 9, "gold": 960, "shards": 13},
+    {"level": 10, "gold": 1160, "shards": 15},
+    {"level": 11, "gold": 1380, "shards": 18},
+    {"level": 12, "gold": 1620, "shards": 21},
+    {"level": 13, "gold": 1880, "shards": 24},
+    {"level": 14, "gold": 2160, "shards": 27},
+    {"level": 15, "gold": 2460, "shards": 30},
+    {"level": 16, "gold": 2780, "shards": 34},
+    {"level": 17, "gold": 3120, "shards": 38},
+    {"level": 18, "gold": 3480, "shards": 42},
+    {"level": 19, "gold": 3860, "shards": 46},
+    {"level": 20, "gold": 4260, "shards": 50}
+  ]
+}

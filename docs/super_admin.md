@@ -54,8 +54,14 @@ Recommended notifications for the super admin:
 - A session exceeds expected daily usage, for example more than 8 hours.
 - A user approaches Pilot account capacity.
 
+## Operations Note
+
+Admin-owned Google Drive storage requires the super admin's Google OAuth token. After a Streamlit cold start or redeploy, `firmstoney@gmail.com` should sign in once to hydrate the admin access-control file into the running app.
+
+If access enforcement must work before the admin signs in after every restart, the next step is an admin-owned Google Apps Script endpoint, service account, or managed database. Do not use local Streamlit filesystem storage for durable admin records.
+
 ## Production Note
 
 Google Drive admin-owned storage is the recommended Pilot 01 storage path because it matches the Gmail/Drive model and avoids operating a database too early.
 
-If the pilot grows beyond light usage or needs stronger query/reporting guarantees, migrate these admin files to a managed database such as Postgres/Supabase. Do not use local Streamlit filesystem storage for durable admin records.
+If the pilot grows beyond light usage or needs stronger query/reporting guarantees, migrate these admin files to a managed database such as Postgres/Supabase.

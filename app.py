@@ -10,7 +10,14 @@ from engines.ticket_engine import DEFAULT_TICKET_DURATION_DAYS, days_until_expir
 from services.account_service import ACCOUNT_LIMIT_MESSAGE, MAX_ACCOUNTS_PER_USER, active_accounts, load_accounts, upsert_account
 from services.daily_action_service import load_daily_actions, upsert_daily_action
 from services.kpi_service import build_kpi_summary
-from services.level_service import NO_RESOURCE_SNAPSHOT_MESSAGE, PLACEHOLDER_COST_WARNING, NoResourceSnapshotError, build_level_plan, load_level_cost_config
+from services.level_service import (
+    NO_RESOURCE_SNAPSHOT_MESSAGE,
+    PLACEHOLDER_COST_WARNING,
+    NoResourceSnapshotError,
+    build_account_jump_matrix,
+    build_level_plan,
+    load_level_cost_config,
+)
 from services.resource_service import latest_snapshot_by_account, load_resource_snapshots, upsert_manual_resource_snapshot
 from services.ticket_service import load_tickets, ticket_by_account, upsert_ticket
 from ui.pilot_auth import current_store, render_login_gate, render_user_bar
@@ -49,6 +56,10 @@ def save_earnings(rows: list[dict]) -> None:
 
 def account_name_by_id(accounts: list[dict]) -> dict[str, str]:
     return {str(item.get("account_id")): str(item.get("account_name", "")) for item in accounts}
+
+
+def format_int(value: int | float | str) -> str:
+    return f"{int(float(value or 0)):,}"
 
 
 with tab_map["Account setup"]:
@@ -208,51 +219,77 @@ with tab_map["Monthly projection"]:
 
 with tab_map["Level + Battle Pass Calculator"]:
     st.subheader("Level + Battle Pass Calculator")
-    st.caption("Pilot build includes the basic level and Battle Pass calculator only. Level simulation is locked.")
+    st.caption("Pilot keeps the account jump planning table and Battle Pass calculator. Simulation mixer, optimization modes, and export are locked.")
     accounts = active_accounts(load_accounts(store))
     snapshots = load_resource_snapshots(store)
     snapshot_map = latest_snapshot_by_account(snapshots)
     level_cost_config = load_level_cost_config()
     if level_cost_config.get("placeholder", False):
         st.warning(PLACEHOLDER_COST_WARNING)
+
     if not accounts:
         st.warning("Add an active account first.")
     else:
-        account_options = {item["account_name"]: item["account_id"] for item in accounts}
-        with st.form("level_planner_form"):
-            account_name = st.selectbox("Account", list(account_options.keys()), key="level_account")
-            account_id = account_options[account_name]
-            unit_name = st.text_input("Unit name")
-            current_level = st.number_input("Current level", min_value=1, value=1, step=1)
-            target_level = st.number_input("Target level", min_value=1, value=2, step=1)
-            submitted = st.form_submit_button("Calculate upgrade plan", type="primary")
-        snapshot = snapshot_map.get(str(account_id))
-        if snapshot:
-            cols = st.columns(2)
-            cols[0].metric("Available gold", f"{int(snapshot.get('gold', 0) or 0):,}")
-            cols[1].metric("Available shards", f"{int(snapshot.get('shards', 0) or 0):,}")
-        else:
-            st.info(NO_RESOURCE_SNAPSHOT_MESSAGE)
+        with st.form("level_jump_matrix_form"):
+            input_cols = st.columns([2, 1, 1, 1])
+            unit_name = input_cols[0].text_input("Unit name", value="Unit 1")
+            current_level = input_cols[1].number_input("Current level", min_value=1, value=1, step=1)
+            target_level = input_cols[2].number_input("Target level", min_value=1, value=2, step=1)
+            selected_account_name = input_cols[3].selectbox("Focus account", [item["account_name"] for item in accounts])
+            submitted = st.form_submit_button("Calculate account jump table", type="primary")
+
         if submitted:
             try:
-                plan = build_level_plan(store, account_id, unit_name, int(current_level), int(target_level), level_cost_config)
-                st.metric("Can upgrade now?", "Yes" if plan.can_upgrade_now else "No")
-                col1, col2, col3, col4 = st.columns(4)
-                col1.metric("Required gold", f"{plan.required_gold:,}")
-                col2.metric("Required shards", f"{plan.required_shards:,}")
-                col3.metric("Available gold", f"{plan.available_gold:,}")
-                col4.metric("Available shards", f"{plan.available_shards:,}")
-                col5, col6, col7 = st.columns(3)
-                col5.metric("Missing gold", f"{plan.missing_gold:,}")
-                col6.metric("Missing shards", f"{plan.missing_shards:,}")
-                col7.metric("Estimated days needed", plan.estimated_days_needed)
-                st.caption(plan.earning_assumption)
-            except NoResourceSnapshotError:
-                st.error(NO_RESOURCE_SNAPSHOT_MESSAGE)
+                matrix = build_account_jump_matrix(accounts, snapshots, unit_name, int(current_level), int(target_level), level_cost_config)
+                st.session_state["level_jump_matrix"] = matrix
+                st.session_state["level_focus_account"] = selected_account_name
             except MissingLevelCostConfigurationError:
                 st.error(MISSING_LEVEL_COST_MESSAGE)
             except ValueError as error:
                 st.error(str(error))
+
+        matrix = st.session_state.get("level_jump_matrix")
+        if matrix:
+            metric_cols = st.columns(5)
+            metric_cols[0].metric("Required gold", format_int(matrix["required_gold"]))
+            metric_cols[1].metric("Required shards", format_int(matrix["required_shards"]))
+            metric_cols[2].metric("Ready accounts", f"{matrix['ready_accounts']}/{len(accounts)}")
+            metric_cols[3].metric("Best account", str(matrix["best_account"]))
+            metric_cols[4].metric("Best max level", int(matrix["best_max_level"]))
+
+            jump_df = pd.DataFrame(matrix["rows"])
+            display_cols = [
+                "Account",
+                "Current Level",
+                "Target Level",
+                "Max Jump Level",
+                "Jump Levels",
+                "Can Reach Target",
+                "Available Gold",
+                "Available Shards",
+                "Required Gold",
+                "Required Shards",
+                "Missing Gold",
+                "Missing Shards",
+                "Estimated Days",
+                "Status",
+            ]
+            st.markdown("### Account jump table")
+            st.dataframe(jump_df[display_cols], use_container_width=True, hide_index=True)
+
+            account_names = [str(row["Account"]) for row in matrix["rows"]]
+            focus_default = st.session_state.get("level_focus_account", account_names[0])
+            focus_index = account_names.index(focus_default) if focus_default in account_names else 0
+            focus_account = st.selectbox("Account detail", account_names, index=focus_index, key="level_focus_detail")
+            focus_row = next(row for row in matrix["rows"] if row["Account"] == focus_account)
+            detail_cols = st.columns(4)
+            detail_cols[0].metric("Available gold", format_int(focus_row["Available Gold"]))
+            detail_cols[1].metric("Available shards", format_int(focus_row["Available Shards"]))
+            detail_cols[2].metric("Missing gold", format_int(focus_row["Missing Gold"]))
+            detail_cols[3].metric("Missing shards", format_int(focus_row["Missing Shards"]))
+            st.caption(matrix["earning_assumption"])
+        else:
+            st.info("Enter a unit and level range, then calculate to see the account jump table.")
 
     st.divider()
     st.markdown("### Battle Pass quick calculator")

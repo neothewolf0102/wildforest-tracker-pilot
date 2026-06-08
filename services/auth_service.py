@@ -16,6 +16,17 @@ class GoogleOAuthConfig:
     scopes: tuple[str, ...] = (*OPENID_SCOPES, GOOGLE_DRIVE_FILE_SCOPE)
 
 
+@dataclass(frozen=True)
+class AuthenticatedUser:
+    google_sub: str
+    email: str
+    display_name: str = ""
+
+    @property
+    def user_id(self) -> str:
+        return f"google_{self.google_sub}"
+
+
 def build_google_login_url(config: GoogleOAuthConfig, state: str, prompt: str = "consent") -> str:
     if not config.client_id:
         raise ValueError("Google OAuth client_id is required.")

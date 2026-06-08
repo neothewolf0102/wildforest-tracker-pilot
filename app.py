@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 
 import pandas as pd
 import streamlit as st
@@ -11,11 +11,8 @@ from services.account_service import ACCOUNT_LIMIT_MESSAGE, MAX_ACCOUNTS_PER_USE
 from services.daily_action_service import load_daily_actions, upsert_daily_action
 from services.kpi_service import build_kpi_summary
 from services.level_service import (
-    NO_RESOURCE_SNAPSHOT_MESSAGE,
     PLACEHOLDER_COST_WARNING,
-    NoResourceSnapshotError,
-    build_account_jump_matrix,
-    build_level_plan,
+    build_multi_account_upgrade_plan,
     load_level_cost_config,
 )
 from services.resource_service import latest_snapshot_by_account, load_resource_snapshots, upsert_manual_resource_snapshot
@@ -60,6 +57,10 @@ def account_name_by_id(accounts: list[dict]) -> dict[str, str]:
 
 def format_int(value: int | float | str) -> str:
     return f"{int(float(value or 0)):,}"
+
+
+def format_float(value: int | float | str, decimals: int = 2) -> str:
+    return f"{float(value or 0):,.{decimals}f}"
 
 
 with tab_map["Account setup"]:
@@ -218,86 +219,133 @@ with tab_map["Monthly projection"]:
         st.bar_chart(monthly.set_index("month")[["total_wf"]])
 
 with tab_map["Level + Battle Pass Calculator"]:
-    st.subheader("Level + Battle Pass Calculator")
-    st.caption("Pilot keeps the account jump planning table and Battle Pass calculator. Simulation mixer, optimization modes, and export are locked.")
+    st.markdown("### Level + Battle Pass Calculator")
+    st.caption("Plan progress, calculate costs, and choose account moves. Level Simulation Mixer and export are locked for Pilot 01.")
     accounts = active_accounts(load_accounts(store))
     snapshots = load_resource_snapshots(store)
-    snapshot_map = latest_snapshot_by_account(snapshots)
     level_cost_config = load_level_cost_config()
     if level_cost_config.get("placeholder", False):
         st.warning(PLACEHOLDER_COST_WARNING)
 
-    if not accounts:
-        st.warning("Add an active account first.")
+    with st.container(border=True):
+        st.markdown("**Leveling Units**")
+        unit_cols = st.columns([2, 1, 1, 2, 1])
+        unit_name = unit_cols[0].text_input("Unit label/name", value=st.session_state.get("pilot_unit_name", "Unit 1"), key="pilot_unit_name")
+        current_level = unit_cols[1].number_input("Current level", min_value=1, max_value=59, value=int(st.session_state.get("pilot_current_level", 10)), step=1, key="pilot_current_level")
+        target_level = unit_cols[2].number_input("Target level", min_value=2, max_value=60, value=max(int(st.session_state.get("pilot_target_level", 60)), 2), step=1, key="pilot_target_level")
+        unit_note = unit_cols[3].text_input("Note", key="pilot_unit_note")
+        save_unit = unit_cols[4].checkbox("Save unit", value=True, key="pilot_save_unit")
+        units = [{"unit_name": unit_name or "Unit 1", "current_level": int(current_level), "target_level": int(target_level), "note": unit_note}] if save_unit else []
+
+    with st.container(border=True):
+        st.markdown("**Market Price Settings**")
+        ron_per_100_shards = st.number_input("RON per 100 shards", min_value=0.0, value=1.4, step=0.1, format="%.2f")
+        st.caption("Market price only values shards. Golds are not included in market shard cost unless a gold market price is added later.")
+
+    with st.container(border=True):
+        st.markdown("**Battle Pass config**")
+        bp_cols = st.columns(4)
+        battle_pass_cost_wf = bp_cols[0].number_input("Battle Pass cost per account", min_value=0.0, value=400.0, step=10.0, format="%.2f")
+        shards_per_account = bp_cols[1].number_input("Shards earned per account per cycle", min_value=0, value=4500, step=100)
+        golds_per_account = bp_cols[2].number_input("Golds earned per account per cycle", min_value=0, value=28000, step=1000)
+        bp_levels_per_cycle = bp_cols[3].number_input("Battle Pass levels farmed per cycle", min_value=0, value=28, step=1)
+        bp_date_cols = st.columns(2)
+        cycle_start = bp_date_cols[0].date_input("Cycle start date", value=date.today())
+        cycle_duration_days = bp_date_cols[1].number_input("Cycle duration days", min_value=1, value=14, step=1)
+        st.caption("Cycle starts on the configured date. Battle Pass farming is trigger-based and not passive.")
+        cycle_end = cycle_start + timedelta(days=int(cycle_duration_days))
+        days_remaining = max((cycle_end - date.today()).days, 0)
+        st.dataframe(pd.DataFrame([{"Cycle start": cycle_start.isoformat(), "Cycle end": cycle_end.isoformat(), "Days remaining": days_remaining, "BP levels/cycle": int(bp_levels_per_cycle)}]), hide_index=True, use_container_width=True)
+
+    active_count = max(len(accounts), 1)
+    total_bp_cost_wf = battle_pass_cost_wf * active_count
+    total_bp_shards = shards_per_account * active_count
+    total_bp_golds = golds_per_account * active_count
+
+    if accounts and units:
+        try:
+            plan = build_multi_account_upgrade_plan(accounts, snapshots, units, level_cost_config, mode=st.session_state.get("pilot_calc_mode", "Best Fit / Least Waste"), use_all_active_accounts=True)
+        except (MissingLevelCostConfigurationError, ValueError) as error:
+            plan = None
+            st.error(MISSING_LEVEL_COST_MESSAGE if isinstance(error, MissingLevelCostConfigurationError) else str(error))
     else:
-        with st.form("level_jump_matrix_form"):
-            input_cols = st.columns([2, 1, 1, 1])
-            unit_name = input_cols[0].text_input("Unit name", value="Unit 1")
-            current_level = input_cols[1].number_input("Current level", min_value=1, value=1, step=1)
-            target_level = input_cols[2].number_input("Target level", min_value=1, value=2, step=1)
-            selected_account_name = input_cols[3].selectbox("Focus account", [item["account_name"] for item in accounts])
-            submitted = st.form_submit_button("Calculate account jump table", type="primary")
+        plan = None
+        if not accounts:
+            st.warning("Add an active account first.")
+        if not units:
+            st.warning("Save at least one unit to calculate the plan.")
 
-        if submitted:
-            try:
-                matrix = build_account_jump_matrix(accounts, snapshots, unit_name, int(current_level), int(target_level), level_cost_config)
-                st.session_state["level_jump_matrix"] = matrix
-                st.session_state["level_focus_account"] = selected_account_name
-            except MissingLevelCostConfigurationError:
-                st.error(MISSING_LEVEL_COST_MESSAGE)
-            except ValueError as error:
-                st.error(str(error))
+    st.markdown("**Summary**")
+    summary = plan["summary"] if plan else {
+        "number_of_units": len(units), "account_jump_required": 0, "enough_resource": False,
+        "required_shards": 0, "required_golds": 0, "available_shards": 0, "available_golds": 0,
+        "remaining_shards": 0, "remaining_golds": 0, "wf_reference_balance": 0.0,
+    }
+    req_shards = int(summary["required_shards"])
+    req_golds = int(summary["required_golds"])
+    market_shard_cost_ron = req_shards / 100 * float(ron_per_100_shards)
+    bp_cost_ron = total_bp_cost_wf * 0.0318
+    card_cols = st.columns(5)
+    card_cols[0].metric("Required shards", format_int(req_shards), help="Total shards required by saved units")
+    card_cols[0].metric("Required golds", format_int(req_golds))
+    card_cols[1].metric("Accounts by shards", format_int(summary.get("account_jump_required", 0)))
+    card_cols[1].metric("Accounts to cover both", format_int(summary.get("account_jump_required", 0)))
+    card_cols[2].metric("Battle Pass cost WF", format_float(total_bp_cost_wf))
+    card_cols[2].metric("Battle Pass cost RON", format_float(bp_cost_ron))
+    card_cols[3].metric("Market shard cost RON", format_float(market_shard_cost_ron))
+    card_cols[3].metric("Market shard cost USD", format_float(market_shard_cost_ron * 0.064))
+    card_cols[4].metric("Surplus shards", format_int(max(int(summary.get("available_shards", 0)) + total_bp_shards - req_shards, 0)))
+    card_cols[4].metric("Surplus golds", format_int(max(int(summary.get("available_golds", 0)) + total_bp_golds - req_golds, 0)))
 
-        matrix = st.session_state.get("level_jump_matrix")
-        if matrix:
-            metric_cols = st.columns(5)
-            metric_cols[0].metric("Required gold", format_int(matrix["required_gold"]))
-            metric_cols[1].metric("Required shards", format_int(matrix["required_shards"]))
-            metric_cols[2].metric("Ready accounts", f"{matrix['ready_accounts']}/{len(accounts)}")
-            metric_cols[3].metric("Best account", str(matrix["best_account"]))
-            metric_cols[4].metric("Best max level", int(matrix["best_max_level"]))
+    st.markdown("**Level Planner**")
+    use_all_accounts = st.checkbox("Use all active accounts", value=True, key="pilot_use_all_active_accounts")
+    calc_mode = st.radio("Calculation mode", ["Minimum Accounts", "Best Fit / Least Waste", "Manual Priority"], index=1, horizontal=True, key="pilot_calc_mode")
+    if st.button("Calculate Level Planner", type="primary", disabled=not accounts or not units):
+        try:
+            st.session_state["pilot_level_plan"] = build_multi_account_upgrade_plan(accounts, snapshots, units, level_cost_config, mode=calc_mode, use_all_active_accounts=use_all_accounts)
+        except MissingLevelCostConfigurationError:
+            st.error(MISSING_LEVEL_COST_MESSAGE)
+        except ValueError as error:
+            st.error(str(error))
 
-            jump_df = pd.DataFrame(matrix["rows"])
-            display_cols = [
-                "Account",
-                "Current Level",
-                "Target Level",
-                "Max Jump Level",
-                "Jump Levels",
-                "Can Reach Target",
-                "Available Gold",
-                "Available Shards",
-                "Required Gold",
-                "Required Shards",
-                "Missing Gold",
-                "Missing Shards",
-                "Estimated Days",
-                "Status",
-            ]
-            st.markdown("### Account jump table")
-            st.dataframe(jump_df[display_cols], use_container_width=True, hide_index=True)
+    plan = st.session_state.get("pilot_level_plan") or plan
+    if plan:
+        summary = plan["summary"]
+        metric_cols = st.columns(5)
+        metric_cols[0].metric("Number of Units", format_int(summary["number_of_units"]))
+        metric_cols[1].metric("Account Jump Required", format_int(summary["account_jump_required"]))
+        metric_cols[2].metric("Enough Resource", "Yes" if summary["enough_resource"] else "No")
+        metric_cols[3].metric("Required Shards", format_int(summary["required_shards"]))
+        metric_cols[4].metric("Required Golds", format_int(summary["required_golds"]))
+        metric_cols_2 = st.columns(5)
+        metric_cols_2[0].metric("Available Shards", format_int(summary["available_shards"]))
+        metric_cols_2[1].metric("Available Golds", format_int(summary["available_golds"]))
+        metric_cols_2[2].metric("Remaining Shards", format_int(summary["remaining_shards"]))
+        metric_cols_2[3].metric("Remaining Golds", format_int(summary["remaining_golds"]))
+        metric_cols_2[4].metric("WF Reference Balance", format_float(summary["wf_reference_balance"]))
 
-            account_names = [str(row["Account"]) for row in matrix["rows"]]
-            focus_default = st.session_state.get("level_focus_account", account_names[0])
-            focus_index = account_names.index(focus_default) if focus_default in account_names else 0
-            focus_account = st.selectbox("Account detail", account_names, index=focus_index, key="level_focus_detail")
-            focus_row = next(row for row in matrix["rows"] if row["Account"] == focus_account)
-            detail_cols = st.columns(4)
-            detail_cols[0].metric("Available gold", format_int(focus_row["Available Gold"]))
-            detail_cols[1].metric("Available shards", format_int(focus_row["Available Shards"]))
-            detail_cols[2].metric("Missing gold", format_int(focus_row["Missing Gold"]))
-            detail_cols[3].metric("Missing shards", format_int(focus_row["Missing Shards"]))
-            st.caption(matrix["earning_assumption"])
+        if summary["enough_resource"]:
+            st.success("All saved units can be completed with selected account resources. Saved balances are not modified.")
         else:
-            st.info("Enter a unit and level range, then calculate to see the account jump table.")
+            st.warning("Incomplete units remain. Account resources are only simulated here; saved balances are not modified.")
 
-    st.divider()
-    st.markdown("### Battle Pass quick calculator")
-    bp_cols = st.columns(4)
-    battle_pass_cost_wf = bp_cols[0].number_input("Battle Pass cost per account", min_value=0.0, value=0.0, step=10.0, format="%.2f")
-    shards_per_account = bp_cols[1].number_input("Shards earned per account per cycle", min_value=0, value=0, step=100)
-    golds_per_account = bp_cols[2].number_input("Gold earned per account per cycle", min_value=0, value=0, step=1000)
-    account_count = bp_cols[3].number_input("Accounts", min_value=1, value=max(len(accounts), 1), step=1)
-    st.metric("Total Battle Pass cost WF", f"{battle_pass_cost_wf * account_count:,.2f}")
-    st.metric("Total shards per cycle", f"{shards_per_account * account_count:,}")
-    st.metric("Total gold per cycle", f"{golds_per_account * account_count:,}")
+        st.markdown("**Unit Upgrade Plan**")
+        st.dataframe(pd.DataFrame(plan["unit_summary"]), hide_index=True, use_container_width=True)
+
+        st.markdown("**Recommended Account Moves**")
+        moves_df = pd.DataFrame(plan["recommended_moves"])
+        if moves_df.empty:
+            st.info("No account move can complete the next pending level with current resources.")
+        else:
+            st.dataframe(moves_df, hide_index=True, use_container_width=True)
+
+        with st.expander("Advanced details", expanded=False):
+            st.markdown("**Raw unit summary**")
+            st.dataframe(pd.DataFrame(plan["raw_unit_summary"]), hide_index=True, use_container_width=True)
+            st.markdown("**Detailed allocation**")
+            st.dataframe(pd.DataFrame(plan["allocation_detail"]), hide_index=True, use_container_width=True)
+            st.markdown("**Skipped / unused accounts**")
+            st.dataframe(pd.DataFrame(plan["skipped_accounts"]), hide_index=True, use_container_width=True)
+            st.caption(plan["earning_assumption"])
+
+    st.caption("Level Simulation Mixer, slider allocation, anchor mode, best-fit simulation pool, custom optimization, OCR, payment, admin dashboard, and export are locked for Pilot 01.")

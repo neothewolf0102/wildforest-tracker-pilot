@@ -18,7 +18,6 @@ SYSTEM_ERROR_LOGS_FILE = "system_error_logs.json"
 SUSPICIOUS_FLAGS_FILE = "suspicious_flags.json"
 ADMIN_NOTIFICATIONS_FILE = "admin_notifications.json"
 
-# Legacy names retained for compatibility with older pilot_auth imports/tests.
 ALLOW_MODE_OPEN = "open_except_blocked"
 ALLOW_MODE_CLOSED = "allowlist_only"
 ADMIN_ACCESS_FILE = ADMIN_USERS_FILE
@@ -29,6 +28,9 @@ MAX_ACTIVITY_LOGS = 5000
 MAX_ERROR_LOGS = 1000
 MAX_FLAGS = 1000
 MAX_NOTIFICATIONS = 1000
+
+NOT_INVITED_MESSAGE = "Your email is not invited to this pilot yet. Please contact the app owner."
+DISABLED_MESSAGE = "Your access has been disabled. Please contact the app owner."
 
 SUSPICIOUS_RULES = {
     "level_planner_calculated": (20, timedelta(minutes=5), "More than 20 level planner calculations within 5 minutes."),
@@ -54,14 +56,20 @@ def normalize_email(email: str) -> str:
     return str(email or "").strip().lower()
 
 
-def is_super_admin(email: str) -> bool:
-    return normalize_email(email) in set(_admin_state().get("super_admin_emails", SUPER_ADMIN_EMAILS))
+def parse_email_config(value: object, fallback: tuple[str, ...] = ()) -> tuple[str, ...]:
+    if value is None or value == "":
+        return tuple(sorted({normalize_email(item) for item in fallback if normalize_email(item)}))
+    if isinstance(value, str):
+        parts = value.replace(",", " ").replace(";", " ").split()
+    else:
+        parts = [str(item) for item in value]
+    parsed = tuple(sorted({normalize_email(item) for item in parts if normalize_email(item)}))
+    return parsed or tuple(sorted({normalize_email(item) for item in fallback if normalize_email(item)}))
 
 
 def default_user_record(email: str, active: bool = True, note: str = "") -> dict[str, Any]:
-    email = normalize_email(email)
     return {
-        "email": email,
+        "email": normalize_email(email),
         "active": bool(active),
         "created_at": now_iso(),
         "updated_at": now_iso(),
@@ -72,9 +80,9 @@ def default_user_record(email: str, active: bool = True, note: str = "") -> dict
 
 
 def default_access_state() -> dict[str, Any]:
-    users = {email: default_user_record(email, active=True, note="Super admin") for email in SUPER_ADMIN_EMAILS}
+    users = {email: default_user_record(email, True, "Super admin") for email in SUPER_ADMIN_EMAILS}
     for email in PILOT_ALLOWED_EMAILS:
-        users.setdefault(normalize_email(email), default_user_record(email, active=True))
+        users.setdefault(email, default_user_record(email, True))
     return {"mode": ALLOW_MODE_CLOSED, "users": users, "updated_at": now_iso()}
 
 
@@ -93,20 +101,28 @@ def _admin_state() -> dict[str, Any]:
     }
 
 
-def configure_admin_config(super_admin_emails: tuple[str, ...] | list[str] | None = None, pilot_allowed_emails: tuple[str, ...] | list[str] | None = None) -> None:
+def is_super_admin(email: str) -> bool:
+    return normalize_email(email) in set(_admin_state().get("super_admin_emails", SUPER_ADMIN_EMAILS))
+
+
+def configure_admin_config(super_admin_emails: object = None, pilot_allowed_emails: object = None) -> None:
     state = _admin_state()
-    if super_admin_emails is not None:
-        state["super_admin_emails"] = tuple(sorted({normalize_email(email) for email in super_admin_emails if normalize_email(email)})) or tuple(SUPER_ADMIN_EMAILS)
-    if pilot_allowed_emails is not None:
-        state["pilot_allowed_emails"] = tuple(sorted({normalize_email(email) for email in pilot_allowed_emails if normalize_email(email)}))
-    access = state["access"]
-    users = access.setdefault("users", {})
+    state["super_admin_emails"] = parse_email_config(super_admin_emails, SUPER_ADMIN_EMAILS)
+    allowed = set(parse_email_config(pilot_allowed_emails, PILOT_ALLOWED_EMAILS))
+    allowed.update(state["super_admin_emails"])
+    state["pilot_allowed_emails"] = tuple(sorted(allowed))
+    users = state["access"].setdefault("users", {})
     for email in state["super_admin_emails"]:
-        record = users.setdefault(email, default_user_record(email, active=True, note="Super admin"))
+        record = users.setdefault(email, default_user_record(email, True, "Super admin"))
         record["active"] = True
+        record["admin_note"] = record.get("admin_note") or "Super admin"
     for email in state["pilot_allowed_emails"]:
-        users.setdefault(email, default_user_record(email, active=True))
-    access["updated_at"] = now_iso()
+        users.setdefault(email, default_user_record(email, True))
+    state["access"]["mode"] = ALLOW_MODE_CLOSED
+    state["access"]["updated_at"] = now_iso()
+
+
+configure_access_config = configure_admin_config
 
 
 def configure_admin_store(store) -> None:
@@ -122,37 +138,32 @@ def hydrate_admin_state(store) -> None:
     try:
         access = store.load_json(ADMIN_USERS_FILE, default=default_access_state())
         if isinstance(access, dict):
-            if "users" not in access:
-                access = _migrate_legacy_access(access)
-            state["access"] = access
-        activity_logs = store.load_json(ACTIVITY_LOGS_FILE, default=[])
-        if isinstance(activity_logs, list):
-            state["activity_logs"] = activity_logs[-MAX_ACTIVITY_LOGS:]
-        error_logs = store.load_json(SYSTEM_ERROR_LOGS_FILE, default=[])
-        if isinstance(error_logs, list):
-            state["system_error_logs"] = error_logs[-MAX_ERROR_LOGS:]
-        flags = store.load_json(SUSPICIOUS_FLAGS_FILE, default=[])
-        if isinstance(flags, list):
-            state["suspicious_flags"] = flags[-MAX_FLAGS:]
-        notifications = store.load_json(ADMIN_NOTIFICATIONS_FILE, default=[])
-        if isinstance(notifications, list):
-            state["notifications"] = notifications[-MAX_NOTIFICATIONS:]
+            state["access"] = _migrate_legacy_access(access) if "users" not in access else access
+        for key, filename, limit in (
+            ("activity_logs", ACTIVITY_LOGS_FILE, MAX_ACTIVITY_LOGS),
+            ("system_error_logs", SYSTEM_ERROR_LOGS_FILE, MAX_ERROR_LOGS),
+            ("suspicious_flags", SUSPICIOUS_FLAGS_FILE, MAX_FLAGS),
+            ("notifications", ADMIN_NOTIFICATIONS_FILE, MAX_NOTIFICATIONS),
+        ):
+            rows = store.load_json(filename, default=[])
+            if isinstance(rows, list):
+                state[key] = rows[-limit:]
         configure_admin_config(state.get("super_admin_emails"), state.get("pilot_allowed_emails"))
         state["hydrated"] = True
     except Exception as error:
         state["hydrated"] = True
-        log_system_error("", "Admin", "storage_load_failed", error, severity="critical")
+        _append_system_error("", "Admin", "storage_load_failed", error, severity="critical", persist=False)
 
 
 def _migrate_legacy_access(access: dict[str, Any]) -> dict[str, Any]:
     users: dict[str, dict[str, Any]] = {}
     for email in access.get("allowed_emails", []):
-        users[normalize_email(email)] = default_user_record(email, active=True)
+        users[normalize_email(email)] = default_user_record(email, True)
     for email in access.get("blocked_emails", []):
-        users[normalize_email(email)] = default_user_record(email, active=False)
+        users[normalize_email(email)] = default_user_record(email, False)
     for email in SUPER_ADMIN_EMAILS:
-        users[email] = default_user_record(email, active=True, note="Super admin")
-    return {"mode": access.get("mode", ALLOW_MODE_CLOSED), "users": users, "updated_at": access.get("updated_at", now_iso())}
+        users[email] = default_user_record(email, True, "Super admin")
+    return {"mode": ALLOW_MODE_CLOSED, "users": users, "updated_at": access.get("updated_at", now_iso())}
 
 
 def persist_admin_state() -> None:
@@ -171,13 +182,22 @@ def persist_admin_state() -> None:
 
 
 def get_access_state() -> dict[str, Any]:
-    return _admin_state()["access"]
+    access = _admin_state()["access"]
+    users = access.setdefault("users", {})
+    access["allowed_emails"] = sorted(email for email, row in users.items() if row.get("active", True))
+    access["blocked_emails"] = sorted(email for email, row in users.items() if not row.get("active", True))
+    return access
+
+
+def get_pilot_users() -> list[dict[str, Any]]:
+    return sorted(get_access_state().get("users", {}).values(), key=lambda row: row.get("email", ""))
 
 
 def set_access_mode(mode: str) -> None:
-    if mode not in {ALLOW_MODE_OPEN, ALLOW_MODE_CLOSED}:
+    if mode not in {ALLOW_MODE_CLOSED, ALLOW_MODE_OPEN}:
         raise ValueError("Invalid access mode.")
-    get_access_state()["mode"] = mode
+    # Pilot 01 is intentionally allowlist-only; keep legacy API harmless.
+    get_access_state()["mode"] = ALLOW_MODE_CLOSED
     get_access_state()["updated_at"] = now_iso()
     persist_admin_state()
 
@@ -187,10 +207,9 @@ def upsert_allowed_user(email: str, active: bool = True, admin_note: str = "") -
     if not email:
         raise ValueError("Email is required.")
     users = get_access_state().setdefault("users", {})
-    record = users.get(email, default_user_record(email, active=active, note=admin_note))
-    record["email"] = email
-    record["active"] = bool(active)
-    record["updated_at"] = now_iso()
+    is_new = email not in users
+    record = users.get(email, default_user_record(email, active, admin_note))
+    record.update({"email": email, "active": bool(active), "updated_at": now_iso()})
     if admin_note:
         record["admin_note"] = admin_note
     if is_super_admin(email):
@@ -198,13 +217,13 @@ def upsert_allowed_user(email: str, active: bool = True, admin_note: str = "") -
     users[email] = record
     get_access_state()["updated_at"] = now_iso()
     persist_admin_state()
-    create_notification("info", "new_user_added_to_allowlist" if active else "user_deactivated", f"{email} updated in pilot allowlist.", email)
+    title = "new_user_added_to_allowlist" if is_new and record["active"] else "user_reactivated" if record["active"] else "user_deactivated"
+    create_notification("info", title, f"{email} updated in pilot access control.", email)
     return record
 
 
 def set_email_access(email: str, allowed: bool, admin_note: str = "") -> None:
     upsert_allowed_user(email, active=allowed, admin_note=admin_note)
-    create_notification("info", "user_reactivated" if allowed else "user_deactivated", f"{normalize_email(email)} {'reactivated' if allowed else 'deactivated'}.", normalize_email(email))
 
 
 def remove_email_from_allowlist(email: str, admin_note: str = "") -> bool:
@@ -221,29 +240,28 @@ def remove_email_from_allowlist(email: str, admin_note: str = "") -> bool:
     return existed
 
 
-def is_email_allowed(email: str) -> bool:
-    return get_access_decision(email)["allowed"]
-
-
 def get_access_decision(email: str) -> dict[str, Any]:
     email = normalize_email(email)
     if is_super_admin(email):
-        return {"allowed": True, "reason": "super_admin"}
+        return {"allowed": True, "reason": "super_admin", "message": ""}
     if not email:
-        return {"allowed": False, "reason": "not_allowlisted"}
-    users = get_access_state().get("users", {})
-    record = users.get(email)
+        return {"allowed": False, "reason": "not_allowlisted", "message": NOT_INVITED_MESSAGE}
+    record = get_access_state().get("users", {}).get(email)
     if record and not record.get("active", True):
-        return {"allowed": False, "reason": "disabled", "record": record}
-    if get_access_state().get("mode") == ALLOW_MODE_CLOSED and not record:
-        return {"allowed": False, "reason": "not_allowlisted"}
-    return {"allowed": True, "reason": "allowed", "record": record}
+        return {"allowed": False, "reason": "disabled", "message": DISABLED_MESSAGE, "record": record}
+    if not record:
+        return {"allowed": False, "reason": "not_allowlisted", "message": NOT_INVITED_MESSAGE}
+    return {"allowed": True, "reason": "allowed", "message": "", "record": record}
+
+
+def is_email_allowed(email: str) -> bool:
+    return get_access_decision(email)["allowed"]
 
 
 def mark_login_success(email: str) -> None:
     email = normalize_email(email)
     users = get_access_state().setdefault("users", {})
-    record = users.setdefault(email, default_user_record(email, active=True))
+    record = users.setdefault(email, default_user_record(email, True))
     record["last_login_at"] = now_iso()
     record["last_activity_at"] = now_iso()
     persist_admin_state()
@@ -251,8 +269,7 @@ def mark_login_success(email: str) -> None:
 
 
 def mark_activity(email: str) -> None:
-    email = normalize_email(email)
-    record = get_access_state().setdefault("users", {}).get(email)
+    record = get_access_state().setdefault("users", {}).get(normalize_email(email))
     if record:
         record["last_activity_at"] = now_iso()
 
@@ -287,7 +304,8 @@ def log_activity(
     state["activity_logs"].append(entry)
     del state["activity_logs"][:-MAX_ACTIVITY_LOGS]
     mark_activity(email)
-    _check_suspicious_activity(email, action_type)
+    if action_type != "suspicious_behavior_flagged":
+        _check_suspicious_activity(email, action_type)
     persist_admin_state()
     return entry
 
@@ -300,8 +318,11 @@ def log_validation_failed(user_email: str, page: str, action_label: str, metadat
     log_activity(user_email, page, "validation_failed", action_label, metadata, status="blocked", severity="warning")
 
 
-def log_system_error(email: str, page: str, action_type: str, error: Exception | str, severity: str = "error") -> dict[str, Any]:
-    return _append_system_error(email, page, action_type, error, severity=severity, persist=True)
+def log_system_error(email: str, page: str, action_type: str | Exception, error: Exception | str | None = None, severity: str = "error") -> dict[str, Any]:
+    if error is None:
+        error = action_type
+        action_type = "unexpected_exception"
+    return _append_system_error(email, page, str(action_type), error, severity=severity, persist=True)
 
 
 def _append_system_error(email: str, page: str, action_type: str, error: Exception | str, severity: str = "error", persist: bool = True) -> dict[str, Any]:
@@ -312,7 +333,7 @@ def _append_system_error(email: str, page: str, action_type: str, error: Excepti
         "page": page,
         "feature": page,
         "action_type": action_type,
-        "error_type": type(error).__name__ if isinstance(error, Exception) else str(action_type),
+        "error_type": type(error).__name__ if isinstance(error, Exception) else action_type,
         "error_message": str(error),
         "short_stack_trace": "".join(traceback.format_exception_only(type(error), error))[-1000:] if isinstance(error, Exception) else "",
         "severity": severity,
@@ -321,7 +342,8 @@ def _append_system_error(email: str, page: str, action_type: str, error: Excepti
     state["system_error_logs"].append(entry)
     del state["system_error_logs"][:-MAX_ERROR_LOGS]
     if severity in {"critical", "error"}:
-        create_notification("critical" if severity == "critical" else "warning", "repeated_system_errors", f"System error: {action_type} - {entry['error_message'][:120]}", normalize_email(email), persist=False)
+        title = "storage_save_failed" if action_type == "storage_save_failed" else "storage_load_failed" if action_type == "storage_load_failed" else "oauth_login_failed" if action_type == "oauth_login_failed" else "repeated_system_errors"
+        create_notification("critical" if severity == "critical" else "warning", title, f"{action_type}: {entry['error_message'][:160]}", normalize_email(email), persist=False)
     _check_repeated_errors(normalize_email(email))
     if persist:
         persist_admin_state()
@@ -333,20 +355,17 @@ def get_audit_logs() -> list[dict[str, Any]]:
 
 
 def get_activity_logs(limit: int | None = None) -> list[dict[str, Any]]:
-    rows = list(_admin_state()["activity_logs"])
-    rows.sort(key=lambda row: row.get("timestamp", ""), reverse=True)
+    rows = sorted(_admin_state()["activity_logs"], key=lambda row: row.get("timestamp", ""), reverse=True)
     return rows[:limit] if limit else rows
 
 
 def get_system_logs(limit: int | None = None) -> list[dict[str, Any]]:
-    rows = list(_admin_state()["system_error_logs"])
-    rows.sort(key=lambda row: row.get("timestamp", ""), reverse=True)
+    rows = sorted(_admin_state()["system_error_logs"], key=lambda row: row.get("timestamp", ""), reverse=True)
     return rows[:limit] if limit else rows
 
 
 def get_suspicious_flags(limit: int | None = None) -> list[dict[str, Any]]:
-    rows = list(_admin_state()["suspicious_flags"])
-    rows.sort(key=lambda row: row.get("timestamp", ""), reverse=True)
+    rows = sorted(_admin_state()["suspicious_flags"], key=lambda row: row.get("timestamp", ""), reverse=True)
     return rows[:limit] if limit else rows
 
 
@@ -369,8 +388,7 @@ def create_notification(severity: str, title: str, message: str, related_user_em
 
 
 def get_notifications(limit: int | None = None) -> list[dict[str, Any]]:
-    rows = list(_admin_state()["notifications"])
-    rows.sort(key=lambda row: row.get("timestamp", ""), reverse=True)
+    rows = sorted(_admin_state()["notifications"], key=lambda row: row.get("timestamp", ""), reverse=True)
     return rows[:limit] if limit else rows
 
 
@@ -405,14 +423,12 @@ def _recent_activity(email: str, action_types: set[str], window: timedelta) -> l
 
 def _recent_errors(email: str, window: timedelta) -> list[dict[str, Any]]:
     cutoff = datetime.now(timezone.utc) - window
-    rows = []
-    for item in _admin_state()["system_error_logs"]:
-        if normalize_email(item.get("user_email") or item.get("email")) != normalize_email(email):
-            continue
-        ts = parse_ts(item.get("timestamp", ""))
-        if ts and ts >= cutoff:
-            rows.append(item)
-    return rows
+    return [
+        item
+        for item in _admin_state()["system_error_logs"]
+        if normalize_email(item.get("user_email") or item.get("email")) == normalize_email(email)
+        and (parse_ts(item.get("timestamp", "")) or datetime.min.replace(tzinfo=timezone.utc)) >= cutoff
+    ]
 
 
 def _check_suspicious_activity(email: str, action_type: str) -> None:
@@ -420,7 +436,12 @@ def _check_suspicious_activity(email: str, action_type: str) -> None:
     if grouped_action not in SUSPICIOUS_RULES:
         return
     threshold, window, reason = SUSPICIOUS_RULES[grouped_action]
-    action_types = {"account_created", "account_deleted"} if grouped_action == "account_change" else {"login_blocked_not_allowlisted", "login_blocked_disabled"} if grouped_action == "login_blocked" else {action_type}
+    if grouped_action == "account_change":
+        action_types = {"account_created", "account_deleted"}
+    elif grouped_action == "login_blocked":
+        action_types = {"login_blocked_not_allowlisted", "login_blocked_disabled"}
+    else:
+        action_types = {action_type}
     if len(_recent_activity(email, action_types, window)) > threshold:
         flag_suspicious_behavior(email, reason, {"action_type": grouped_action, "threshold": threshold})
 
@@ -432,21 +453,17 @@ def _check_repeated_errors(email: str) -> None:
 
 def flag_suspicious_behavior(email: str, reason: str, metadata: dict[str, Any] | None = None) -> dict[str, Any]:
     email = normalize_email(email) or "anonymous"
-    flags = _admin_state()["suspicious_flags"]
-    recent_duplicate = any(flag.get("user_email") == email and flag.get("reason") == reason and parse_ts(flag.get("timestamp", "")) and parse_ts(flag.get("timestamp", "")) >= datetime.now(timezone.utc) - timedelta(minutes=10) for flag in flags)
-    if recent_duplicate:
-        return flags[-1]
+    cutoff = datetime.now(timezone.utc) - timedelta(minutes=10)
+    for flag in reversed(_admin_state()["suspicious_flags"]):
+        ts = parse_ts(flag.get("timestamp", ""))
+        if flag.get("user_email") == email and flag.get("reason") == reason and ts and ts >= cutoff:
+            return flag
     flag = {"timestamp": now_iso(), "user_email": email, "reason": reason, "metadata": metadata or {}, "severity": "warning"}
-    flags.append(flag)
-    del flags[:-MAX_FLAGS]
+    _admin_state()["suspicious_flags"].append(flag)
+    del _admin_state()["suspicious_flags"][:-MAX_FLAGS]
     create_notification("critical", "user_suspicious_behavior_flagged", reason, email, persist=False)
     log_activity(email, "Security", "suspicious_behavior_flagged", reason, metadata, status="success", severity="warning")
     return flag
-
-
-def get_user_resource_snapshot(email: str) -> dict[str, Any]:
-    # Per-user gameplay data stays in the user's own store. Cross-user Drive reads are intentionally not implemented in Pilot 01.
-    return {"account_count": 0, "total_gold": 0, "total_shards": 0, "total_wf": 0.0}
 
 
 def _usage_duration_by_days(logs: list[dict[str, Any]], days: int) -> float:
@@ -454,12 +471,9 @@ def _usage_duration_by_days(logs: list[dict[str, Any]], days: int) -> float:
     by_day: dict[str, list[datetime]] = defaultdict(list)
     for item in logs:
         ts = parse_ts(item.get("timestamp", ""))
-        if not ts or ts.date() < cutoff:
-            continue
-        by_day[ts.date().isoformat()].append(ts)
-    seconds = 0.0
-    for timestamps in by_day.values():
-        seconds += max((max(timestamps) - min(timestamps)).total_seconds(), 0)
+        if ts and ts.date() >= cutoff:
+            by_day[ts.date().isoformat()].append(ts)
+    seconds = sum(max((max(items) - min(items)).total_seconds(), 0) for items in by_day.values())
     return round(seconds / 3600, 2)
 
 
@@ -476,8 +490,7 @@ def get_usage_summary() -> list[dict[str, Any]]:
         by_user[email].append(item)
         feature_counter[email][item.get("page") or item.get("feature") or "Unknown"] += 1
     rows = []
-    all_emails = sorted(set(users.keys()) | set(by_user.keys()))
-    for email in all_emails:
+    for email in sorted(set(users.keys()) | set(by_user.keys())):
         user_logs = by_user.get(email, [])
         today_actions = 0
         seven_day_actions = 0
@@ -485,13 +498,10 @@ def get_usage_summary() -> list[dict[str, Any]]:
             ts = parse_ts(item.get("timestamp", ""))
             if not ts:
                 continue
-            if ts.date() == today:
-                today_actions += 1
-            if ts.date() >= seven_day_cutoff:
-                seven_day_actions += 1
+            today_actions += int(ts.date() == today)
+            seven_day_actions += int(ts.date() >= seven_day_cutoff)
         user_flags = [flag for flag in flags if normalize_email(flag.get("user_email")) == email]
-        record = users.get(email, default_user_record(email, active=False))
-        resource_summary = get_user_resource_snapshot(email)
+        record = users.get(email, default_user_record(email, False))
         rows.append({
             "email": email,
             "status": "active" if record.get("active", False) else "disabled",
@@ -503,12 +513,12 @@ def get_usage_summary() -> list[dict[str, Any]]:
             "total_actions_today": today_actions,
             "total_actions_last_7_days": seven_day_actions,
             "top_used_feature": feature_counter[email].most_common(1)[0][0] if feature_counter[email] else "",
-            "account_count": resource_summary["account_count"],
-            "total_gold": resource_summary["total_gold"],
-            "total_shards": resource_summary["total_shards"],
-            "total_wf": resource_summary["total_wf"],
+            "account_count": record.get("account_count", ""),
+            "total_gold": record.get("total_gold", ""),
+            "total_shards": record.get("total_shards", ""),
+            "total_wf": record.get("total_wf", ""),
             "suspicious_flag_count": len(user_flags),
-            "last_suspicious_reason": user_flags[-1]["reason"] if user_flags else "",
+            "last_suspicious_reason": user_flags[0]["reason"] if user_flags else "",
             "admin_note": record.get("admin_note", ""),
         })
     return rows
@@ -517,6 +527,6 @@ def get_usage_summary() -> list[dict[str, Any]]:
 def notification_recommendations() -> list[str]:
     return [
         "Critical: suspicious behavior, repeated system errors, storage failures, OAuth failures, repeated price API failures.",
-        "Warning: high action frequency, repeated validation failures, repeated duplicate account/wallet attempts, repeated login blocks.",
+        "Warning: high action frequency, repeated validation failures, duplicate account/wallet attempts, repeated login blocks.",
         "Info: user added, deactivated, reactivated, or removed from allowlist.",
     ]

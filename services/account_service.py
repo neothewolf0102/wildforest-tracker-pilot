@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from uuid import uuid4
 
-from services.admin_service import DUPLICATE_ACCOUNT_NAME_MESSAGE as _unused  # type: ignore[attr-defined]
 from services.admin_service import log_activity, log_system_error, log_validation_failed
 
 ACCOUNTS_FILE = "accounts.json"

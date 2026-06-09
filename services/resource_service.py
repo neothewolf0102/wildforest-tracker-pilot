@@ -2,7 +2,30 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+from services.admin_service import log_activity, log_system_error
+
 RESOURCES_FILE = "resource_snapshots.json"
+
+
+def _store_email(store) -> str:
+    context = getattr(store, "context", None)
+    user = getattr(context, "user", None)
+    email = getattr(user, "email", "") if user else ""
+    return str(email or getattr(store, "namespace", "") or "")
+
+
+def _safe_log_activity(store, action_type: str, action_label: str = "", metadata: dict | None = None) -> None:
+    try:
+        log_activity(_store_email(store), "Resources", action_type, action_label, metadata)
+    except Exception:
+        pass
+
+
+def _safe_log_error(store, action_type: str, error: Exception | str) -> None:
+    try:
+        log_system_error(_store_email(store), "Resources", action_type, error, severity="error")
+    except Exception:
+        pass
 
 
 def load_resource_snapshots(store) -> list[dict]:
@@ -28,5 +51,10 @@ def upsert_manual_resource_snapshot(store, account_id: str, gold: int, shards: i
         "note": note.strip(),
     }
     snapshots.append(snapshot)
-    store.save_json(RESOURCES_FILE, snapshots)
+    try:
+        store.save_json(RESOURCES_FILE, snapshots)
+    except Exception as error:
+        _safe_log_error(store, "storage_save_failed", error)
+        raise
+    _safe_log_activity(store, "resource_snapshot_saved", str(account_id), {"account_id": account_id, "gold": int(gold), "shards": int(shards), "wf": float(wf)})
     return snapshot

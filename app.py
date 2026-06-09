@@ -1,6 +1,10 @@
 from __future__ import annotations
 
-from datetime import date, timedelta
+import json
+import time
+from datetime import date, datetime, timedelta, timezone
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 
 import pandas as pd
 import streamlit as st
@@ -19,6 +23,15 @@ from services.resource_service import latest_snapshot_by_account, load_resource_
 from services.ticket_service import load_tickets, ticket_by_account, upsert_ticket
 from ui.pilot_auth import current_store, render_login_gate, render_user_bar
 
+PRICE_REFRESH_SECONDS = 1800
+BANGKOK_TZ = timezone(timedelta(hours=7), name="UTC+7")
+WF_TOKEN_ADDRESS = "0x03affae7e23fd11c85d0c90cc40510994d49e175"
+WF_GECKOTERMINAL_URL = (
+    "https://api.geckoterminal.com/api/v2/networks/ronin/tokens/"
+    f"{WF_TOKEN_ADDRESS}"
+)
+RON_COINGECKO_URL = "https://api.coingecko.com/api/v3/simple/price?ids=ronin&vs_currencies=usd&include_24hr_change=true"
+
 st.set_page_config(page_title="Wildforest Tracker Pilot 01", page_icon="🌲", layout="wide")
 
 if not render_login_gate():
@@ -28,7 +41,7 @@ render_user_bar()
 store = current_store()
 
 st.title("Wildforest Tracker")
-st.caption("Pilot global build. Same local-style tab workflow with locked pilot-only exclusions.")
+st.caption("Pilot global build. Level Mixer stays locked; multi-unit Level Planner and WF/RON prices are enabled.")
 
 TAB_NAMES = [
     "Account setup",
@@ -41,6 +54,10 @@ TAB_NAMES = [
 
 tabs = st.tabs(TAB_NAMES)
 tab_map = dict(zip(TAB_NAMES, tabs))
+
+
+def now_utc7() -> datetime:
+    return datetime.now(BANGKOK_TZ)
 
 
 def load_earnings() -> list[dict]:
@@ -61,6 +78,165 @@ def format_int(value: int | float | str) -> str:
 
 def format_float(value: int | float | str, decimals: int = 2) -> str:
     return f"{float(value or 0):,.{decimals}f}"
+
+
+def safe_float(value: object, default: float = 0.0) -> float:
+    try:
+        return float(value or default)
+    except (TypeError, ValueError):
+        return default
+
+
+@st.cache_data(ttl=PRICE_REFRESH_SECONDS)
+def fetch_wf_price_api() -> dict:
+    raw_text = ""
+    try:
+        request = Request(WF_GECKOTERMINAL_URL, headers={"accept": "application/json", "user-agent": "wildforest-tracker-pilot"})
+        with urlopen(request, timeout=10) as response:
+            raw_text = response.read().decode("utf-8")
+        payload = json.loads(raw_text)
+        attributes = payload.get("data", {}).get("attributes", {}) if isinstance(payload, dict) else {}
+        for field in ("token_price_usd", "price_usd", "base_token_price_usd", "quote_token_price_usd"):
+            value = safe_float(attributes.get(field), 0.0)
+            if value > 0:
+                return {
+                    "ok": True,
+                    "symbol": "WF/USDT",
+                    "price": value,
+                    "source": "GeckoTerminal",
+                    "updated_at": now_utc7().isoformat(timespec="seconds"),
+                }
+        return {"ok": False, "symbol": "WF/USDT", "error": "WF price not found in API response.", "raw_excerpt": raw_text[:300]}
+    except (HTTPError, URLError, TimeoutError, json.JSONDecodeError, TypeError, ValueError) as error:
+        return {"ok": False, "symbol": "WF/USDT", "error": str(error), "raw_excerpt": raw_text[:300]}
+
+
+@st.cache_data(ttl=PRICE_REFRESH_SECONDS)
+def fetch_ron_price_api() -> dict:
+    raw_text = ""
+    try:
+        request = Request(RON_COINGECKO_URL, headers={"accept": "application/json", "user-agent": "wildforest-tracker-pilot"})
+        with urlopen(request, timeout=10) as response:
+            raw_text = response.read().decode("utf-8")
+        payload = json.loads(raw_text)
+        ron_payload = payload.get("ronin", {}) if isinstance(payload, dict) else {}
+        price = safe_float(ron_payload.get("usd"), 0.0)
+        if price > 0:
+            return {
+                "ok": True,
+                "symbol": "RON/USDT",
+                "price": price,
+                "source": "CoinGecko",
+                "updated_at": now_utc7().isoformat(timespec="seconds"),
+            }
+        return {"ok": False, "symbol": "RON/USDT", "error": "RON price not found in API response.", "raw_excerpt": raw_text[:300]}
+    except (HTTPError, URLError, TimeoutError, json.JSONDecodeError, TypeError, ValueError) as error:
+        return {"ok": False, "symbol": "RON/USDT", "error": str(error), "raw_excerpt": raw_text[:300]}
+
+
+def load_price_state() -> dict:
+    return dict(store.load_json("price_state.json", default={}))
+
+
+def save_price_state(price_state: dict) -> None:
+    store.save_json("price_state.json", price_state)
+
+
+def refresh_price_state(force: bool = False) -> dict:
+    price_state = load_price_state()
+    last_refresh = pd.to_datetime(price_state.get("last_refresh_at", ""), errors="coerce")
+    is_stale = True
+    if pd.notna(last_refresh):
+        is_stale = datetime.now(timezone.utc).replace(tzinfo=None) >= last_refresh.to_pydatetime().replace(tzinfo=None) + timedelta(seconds=PRICE_REFRESH_SECONDS)
+
+    if force or is_stale or not price_state:
+        wf_result = fetch_wf_price_api()
+        ron_result = fetch_ron_price_api()
+        if wf_result.get("ok"):
+            price_state["wf_usdt"] = wf_result["price"]
+            price_state["wf_source"] = wf_result["source"]
+            price_state["wf_updated_at"] = wf_result["updated_at"]
+            price_state.pop("wf_error", None)
+        else:
+            price_state["wf_error"] = wf_result.get("error", "WF price API failed.")
+        if ron_result.get("ok"):
+            price_state["ron_usdt"] = ron_result["price"]
+            price_state["ron_source"] = ron_result["source"]
+            price_state["ron_updated_at"] = ron_result["updated_at"]
+            price_state.pop("ron_error", None)
+        else:
+            price_state["ron_error"] = ron_result.get("error", "RON price API failed.")
+        price_state["last_refresh_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        save_price_state(price_state)
+    return price_state
+
+
+def render_price_panel(price_state: dict) -> dict:
+    st.markdown("**WF/RON Price Panel**")
+    price_cols = st.columns([1, 1, 1, 1])
+    wf_price = safe_float(price_state.get("wf_usdt"), 0.0)
+    ron_price = safe_float(price_state.get("ron_usdt"), 0.0)
+    price_cols[0].metric("WF/USDT", f"${wf_price:,.6f}" if wf_price > 0 else "Missing")
+    price_cols[1].metric("RON/USDT", f"${ron_price:,.6f}" if ron_price > 0 else "Missing")
+    price_cols[2].caption(f"WF source: {price_state.get('wf_source', 'manual/API pending')}")
+    price_cols[2].caption(f"WF updated: {price_state.get('wf_updated_at', '-')}")
+    price_cols[3].caption(f"RON source: {price_state.get('ron_source', 'manual/API pending')}")
+    price_cols[3].caption(f"RON updated: {price_state.get('ron_updated_at', '-')}")
+
+    if price_state.get("wf_error"):
+        st.warning(f"WF price API issue: {price_state['wf_error']}")
+    if price_state.get("ron_error"):
+        st.warning(f"RON price API issue: {price_state['ron_error']}")
+
+    action_cols = st.columns([1, 1, 2])
+    if action_cols[0].button("Refresh prices", key="refresh_prices_button"):
+        fetch_wf_price_api.clear()
+        fetch_ron_price_api.clear()
+        refreshed = refresh_price_state(force=True)
+        st.success("Price refresh requested.")
+        st.rerun()
+
+    with action_cols[2].expander("Manual price fallback", expanded=False):
+        manual_wf = st.number_input("Manual WF/USDT", min_value=0.0, value=wf_price, step=0.0001, format="%.6f", key="manual_wf_price")
+        manual_ron = st.number_input("Manual RON/USDT", min_value=0.0, value=ron_price, step=0.0001, format="%.6f", key="manual_ron_price")
+        if st.button("Save manual prices", key="save_manual_prices"):
+            price_state["wf_usdt"] = float(manual_wf)
+            price_state["ron_usdt"] = float(manual_ron)
+            price_state["wf_source"] = "manual"
+            price_state["ron_source"] = "manual"
+            now_text = now_utc7().isoformat(timespec="seconds")
+            price_state["wf_updated_at"] = now_text
+            price_state["ron_updated_at"] = now_text
+            price_state["last_refresh_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+            save_price_state(price_state)
+            st.success("Manual prices saved.")
+            st.rerun()
+
+    if wf_price <= 0 or ron_price <= 0:
+        st.warning("WF/RON prices are missing. Add manual prices or refresh API before using investment comparison.")
+    return price_state
+
+
+def ensure_level_unit_blocks() -> list[dict]:
+    if "pilot_level_unit_blocks" not in st.session_state:
+        st.session_state["pilot_level_unit_blocks"] = [
+            {"unit_name": "Unit 1", "current_level": 10, "target_level": 60, "note": "", "saved": True}
+        ]
+    return st.session_state["pilot_level_unit_blocks"]
+
+
+def add_level_unit() -> None:
+    units = ensure_level_unit_blocks()
+    next_index = len(units) + 1
+    units.append({"unit_name": f"Unit {next_index}", "current_level": 10, "target_level": 60, "note": "", "saved": True})
+    st.session_state["pilot_level_unit_blocks"] = units
+
+
+def remove_level_unit(index: int) -> None:
+    units = ensure_level_unit_blocks()
+    if len(units) <= 1:
+        return
+    st.session_state["pilot_level_unit_blocks"] = [unit for idx, unit in enumerate(units) if idx != index]
 
 
 with tab_map["Account setup"]:
@@ -207,14 +383,16 @@ with tab_map["Weekly KPI"]:
 with tab_map["Monthly projection"]:
     st.subheader("Monthly projection")
     earnings = pd.DataFrame(load_earnings())
-    wf_price = st.number_input("Manual WF price USDT for projection", min_value=0.0, value=0.0, step=0.0001, format="%.6f")
+    price_state = refresh_price_state(force=False)
+    wf_price = safe_float(price_state.get("wf_usdt"), 0.0)
+    manual_projection_price = st.number_input("WF price USDT for projection", min_value=0.0, value=wf_price, step=0.0001, format="%.6f")
     if earnings.empty:
         st.info("No monthly data yet.")
     else:
         earnings["event_date"] = pd.to_datetime(earnings["event_date"], errors="coerce")
         earnings["month"] = earnings["event_date"].dt.strftime("%Y-%m")
         monthly = earnings.groupby("month", as_index=False)[["leaderboard_wf", "pve_wf", "bounty_wf", "total_wf"]].sum()
-        monthly["estimated_usdt"] = monthly["total_wf"] * float(wf_price)
+        monthly["estimated_usdt"] = monthly["total_wf"] * float(manual_projection_price)
         st.dataframe(monthly, use_container_width=True, hide_index=True)
         st.bar_chart(monthly.set_index("month")[["total_wf"]])
 
@@ -227,15 +405,40 @@ with tab_map["Level + Battle Pass Calculator"]:
     if level_cost_config.get("placeholder", False):
         st.warning(PLACEHOLDER_COST_WARNING)
 
+    price_state = refresh_price_state(force=False)
     with st.container(border=True):
-        st.markdown("**Leveling Units**")
-        unit_cols = st.columns([2, 1, 1, 2, 1])
-        unit_name = unit_cols[0].text_input("Unit label/name", value=st.session_state.get("pilot_unit_name", "Unit 1"), key="pilot_unit_name")
-        current_level = unit_cols[1].number_input("Current level", min_value=1, max_value=59, value=int(st.session_state.get("pilot_current_level", 10)), step=1, key="pilot_current_level")
-        target_level = unit_cols[2].number_input("Target level", min_value=2, max_value=60, value=max(int(st.session_state.get("pilot_target_level", 60)), 2), step=1, key="pilot_target_level")
-        unit_note = unit_cols[3].text_input("Note", key="pilot_unit_note")
-        save_unit = unit_cols[4].checkbox("Save unit", value=True, key="pilot_save_unit")
-        units = [{"unit_name": unit_name or "Unit 1", "current_level": int(current_level), "target_level": int(target_level), "note": unit_note}] if save_unit else []
+        price_state = render_price_panel(price_state)
+    wf_price_usdt = safe_float(price_state.get("wf_usdt"), 0.0)
+    ron_price_usdt = safe_float(price_state.get("ron_usdt"), 0.0)
+
+    with st.container(border=True):
+        header_cols = st.columns([3, 1])
+        header_cols[0].markdown("**Leveling Units**")
+        if header_cols[1].button("+ Add Unit", key="add_level_unit_button", type="primary"):
+            add_level_unit()
+            st.rerun()
+
+        units_state = ensure_level_unit_blocks()
+        units = []
+        for idx, unit in enumerate(list(units_state)):
+            row_cols = st.columns([2, 1, 1, 2, 1, 1])
+            unit["unit_name"] = row_cols[0].text_input("Unit label/name", value=str(unit.get("unit_name") or f"Unit {idx + 1}"), key=f"pilot_unit_name_{idx}")
+            unit["current_level"] = int(row_cols[1].number_input("Current level", min_value=1, max_value=59, value=int(unit.get("current_level", 10)), step=1, key=f"pilot_current_level_{idx}"))
+            unit["target_level"] = int(row_cols[2].number_input("Target level", min_value=2, max_value=60, value=max(int(unit.get("target_level", 60)), 2), step=1, key=f"pilot_target_level_{idx}"))
+            unit["note"] = row_cols[3].text_input("Note", value=str(unit.get("note", "")), key=f"pilot_unit_note_{idx}")
+            unit["saved"] = bool(row_cols[4].checkbox("Save unit", value=bool(unit.get("saved", True)), key=f"pilot_save_unit_{idx}"))
+            if row_cols[5].button("Remove", key=f"remove_level_unit_{idx}", disabled=len(units_state) <= 1):
+                remove_level_unit(idx)
+                st.rerun()
+            if unit["saved"]:
+                units.append({
+                    "unit_name": unit["unit_name"] or f"Unit {idx + 1}",
+                    "current_level": int(unit["current_level"]),
+                    "target_level": int(unit["target_level"]),
+                    "note": unit.get("note", ""),
+                })
+        st.session_state["pilot_level_unit_blocks"] = units_state
+        st.caption("Add multiple units here. Planning is read-only and will not deduct saved resources.")
 
     with st.container(border=True):
         st.markdown("**Market Price Settings**")
@@ -284,16 +487,21 @@ with tab_map["Level + Battle Pass Calculator"]:
     req_shards = int(summary["required_shards"])
     req_golds = int(summary["required_golds"])
     market_shard_cost_ron = req_shards / 100 * float(ron_per_100_shards)
-    bp_cost_ron = total_bp_cost_wf * 0.0318
+    market_shard_cost_usd = market_shard_cost_ron * ron_price_usdt
+    bp_cost_usd = total_bp_cost_wf * wf_price_usdt
+    bp_cost_ron = bp_cost_usd / ron_price_usdt if ron_price_usdt > 0 else 0.0
+
     card_cols = st.columns(5)
+    card_cols[0].metric("Units", format_int(summary.get("number_of_units", len(units))))
     card_cols[0].metric("Required shards", format_int(req_shards), help="Total shards required by saved units")
     card_cols[0].metric("Required golds", format_int(req_golds))
     card_cols[1].metric("Accounts by shards", format_int(summary.get("account_jump_required", 0)))
     card_cols[1].metric("Accounts to cover both", format_int(summary.get("account_jump_required", 0)))
     card_cols[2].metric("Battle Pass cost WF", format_float(total_bp_cost_wf))
     card_cols[2].metric("Battle Pass cost RON", format_float(bp_cost_ron))
+    card_cols[2].metric("Battle Pass cost USD", format_float(bp_cost_usd))
     card_cols[3].metric("Market shard cost RON", format_float(market_shard_cost_ron))
-    card_cols[3].metric("Market shard cost USD", format_float(market_shard_cost_ron * 0.064))
+    card_cols[3].metric("Market shard cost USD", format_float(market_shard_cost_usd))
     card_cols[4].metric("Surplus shards", format_int(max(int(summary.get("available_shards", 0)) + total_bp_shards - req_shards, 0)))
     card_cols[4].metric("Surplus golds", format_int(max(int(summary.get("available_golds", 0)) + total_bp_golds - req_golds, 0)))
 
@@ -348,4 +556,4 @@ with tab_map["Level + Battle Pass Calculator"]:
             st.dataframe(pd.DataFrame(plan["skipped_accounts"]), hide_index=True, use_container_width=True)
             st.caption(plan["earning_assumption"])
 
-    st.caption("Level Simulation Mixer, slider allocation, anchor mode, best-fit simulation pool, custom optimization, OCR, payment, admin dashboard, and export are locked for Pilot 01.")
+    st.caption("Level Simulation Mixer, slider allocation, anchor mode, custom optimization, OCR, payment, admin dashboard, and export are locked for Pilot 01.")

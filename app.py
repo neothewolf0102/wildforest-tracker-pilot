@@ -11,7 +11,7 @@ import streamlit as st
 
 from engines.level_cost_engine import MISSING_LEVEL_COST_MESSAGE, MissingLevelCostConfigurationError
 from engines.ticket_engine import DEFAULT_TICKET_DURATION_DAYS, days_until_expiry, ticket_status
-from services.account_service import ACCOUNT_LIMIT_MESSAGE, MAX_ACCOUNTS_PER_USER, active_accounts, load_accounts, upsert_account
+from services.account_service import ACCOUNT_LIMIT_MESSAGE, MAX_ACCOUNTS_PER_USER, active_accounts, delete_account, load_accounts, upsert_account
 from services.daily_action_service import load_daily_actions, upsert_daily_action
 from services.kpi_service import build_kpi_summary
 from services.level_service import (
@@ -192,7 +192,7 @@ def render_price_panel(price_state: dict) -> dict:
     if action_cols[0].button("Refresh prices", key="refresh_prices_button"):
         fetch_wf_price_api.clear()
         fetch_ron_price_api.clear()
-        refreshed = refresh_price_state(force=True)
+        refresh_price_state(force=True)
         st.success("Price refresh requested.")
         st.rerun()
 
@@ -254,23 +254,64 @@ with tab_map["Account setup"]:
     if len(accounts) >= MAX_ACCOUNTS_PER_USER:
         st.warning(ACCOUNT_LIMIT_MESSAGE)
 
+    selected_account = None
+    if accounts:
+        selected_account_id = st.selectbox(
+            "Select existing account",
+            [str(item.get("account_id", "")) for item in accounts],
+            format_func=lambda account_id: next((item.get("account_name", account_id) for item in accounts if str(item.get("account_id", "")) == str(account_id)), str(account_id)),
+            key="selected_account_id",
+        )
+        selected_account = next((item for item in accounts if str(item.get("account_id", "")) == str(selected_account_id)), None)
+    else:
+        selected_account_id = ""
+        st.info("No existing account selected. Add your first account below.")
+
+    account_mode = st.radio("Account action", ["Add account", "Edit selected account"], horizontal=True, disabled=not accounts)
+    editing = account_mode == "Edit selected account" and selected_account is not None
+    form_title = "Edit account" if editing else "Add account"
+    st.markdown(f"**{form_title}**")
+
     with st.form("account_form"):
-        account_name = st.text_input("Account name")
-        wallet_address = st.text_input("Wallet address")
-        active = st.checkbox("Active", value=True)
-        note = st.text_input("Note")
-        submitted = st.form_submit_button("Save account", type="primary", disabled=len(accounts) >= MAX_ACCOUNTS_PER_USER)
+        account_name = st.text_input("Account name", value=str(selected_account.get("account_name", "")) if editing else "")
+        wallet_address = st.text_input("Wallet address", value=str(selected_account.get("wallet_address", "")) if editing else "")
+        active = st.checkbox("Active", value=bool(selected_account.get("active", True)) if editing else True)
+        note = st.text_input("Note", value=str(selected_account.get("note", "")) if editing else "")
+        disabled_for_limit = not editing and len(accounts) >= MAX_ACCOUNTS_PER_USER
+        submitted = st.form_submit_button("Save account", type="primary", disabled=disabled_for_limit)
         if submitted:
             try:
-                upsert_account(store, account_name, wallet_address, active, note)
+                upsert_account(
+                    store,
+                    account_name,
+                    wallet_address,
+                    active,
+                    note,
+                    account_id=str(selected_account.get("account_id")) if editing and selected_account else None,
+                )
                 st.success("Account saved.")
                 st.rerun()
             except Exception as error:
                 st.error(f"Save failed: {error}")
 
+    if accounts and selected_account is not None:
+        st.markdown("**Delete account**")
+        st.caption("Deleting an account does not remove historical snapshots in this pilot build.")
+        confirm_delete = st.checkbox(
+            f"Confirm delete account: {selected_account.get('account_name', '')}",
+            key="confirm_delete_account",
+        )
+        if st.button("Delete selected account", type="secondary", disabled=not confirm_delete):
+            deleted = delete_account(store, str(selected_account.get("account_id", "")))
+            if deleted:
+                st.success("Account deleted.")
+                st.rerun()
+            else:
+                st.warning("Selected account was not found. No changes were made.")
+
     if accounts:
         account_rows = []
-        for account in accounts:
+        for account in load_accounts(store):
             snapshot = snapshot_map.get(str(account.get("account_id")), {})
             account_rows.append({
                 "Account": account.get("account_name", ""),
@@ -287,7 +328,7 @@ with tab_map["Account setup"]:
 
     st.divider()
     st.subheader("Resource Snapshot")
-    active = active_accounts(accounts)
+    active = active_accounts(load_accounts(store))
     if not active:
         st.info("Add an active account before saving resources.")
     else:

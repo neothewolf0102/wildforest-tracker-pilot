@@ -240,19 +240,80 @@ def remove_level_unit(index: int) -> None:
     st.session_state["pilot_level_unit_blocks"] = [unit for idx, unit in enumerate(units) if idx != index]
 
 
+def short_wallet(wallet_address: str) -> str:
+    wallet = str(wallet_address or "").strip()
+    if len(wallet) <= 14:
+        return wallet
+    return f"{wallet[:6]}...{wallet[-4:]}"
+
+
+def account_option_label(account: dict) -> str:
+    return f"{account.get('account_name', '')} ({short_wallet(account.get('wallet_address', ''))})"
+
+
+def normalize_account_text(value: object) -> str:
+    return str(value or "").strip()
+
+
+def normalize_account_key(value: object) -> str:
+    return normalize_account_text(value).casefold()
+
+
+def find_account_by_id(accounts: list[dict], account_id: str) -> dict | None:
+    target_id = str(account_id or "")
+    return next((item for item in accounts if str(item.get("account_id", "")) == target_id), None)
+
+
 def reset_account_form_state() -> None:
     st.session_state["account_form_name"] = ""
     st.session_state["account_form_wallet"] = ""
     st.session_state["account_form_active"] = True
     st.session_state["account_form_note"] = ""
-    st.session_state["account_loaded_id"] = ""
     st.session_state["account_action_select"] = "Create new account"
     st.session_state["account_confirm_delete"] = False
 
 
-def request_account_form_reset(message: str) -> None:
-    st.session_state["account_form_reset_requested"] = True
-    st.session_state["account_form_success_message"] = message
+def set_account_form_from_account(account: dict | None) -> None:
+    if account is None:
+        st.session_state["account_form_name"] = ""
+        st.session_state["account_form_wallet"] = ""
+        st.session_state["account_form_active"] = True
+        st.session_state["account_form_note"] = ""
+        st.session_state["account_confirm_delete"] = False
+        return
+    st.session_state["account_form_name"] = account.get("account_name", "")
+    st.session_state["account_form_wallet"] = account.get("wallet_address", "")
+    st.session_state["account_form_active"] = bool(account.get("active", True))
+    st.session_state["account_form_note"] = account.get("note", "")
+    st.session_state["account_confirm_delete"] = False
+
+
+def queue_account_reset(message: str, flash_type: str = "success") -> None:
+    st.session_state["account_reset_requested"] = True
+    st.session_state["account_flash_message"] = message
+    st.session_state["account_flash_type"] = flash_type
+    st.session_state["account_selected_id"] = ""
+    st.session_state["account_mode"] = "create"
+
+
+def validate_account_form(accounts: list[dict], account_name: str, wallet_address: str, selected_account_id: str) -> str | None:
+    clean_name = normalize_account_text(account_name)
+    clean_wallet = normalize_account_text(wallet_address)
+    if not clean_name:
+        return "Account name is required."
+    if not clean_wallet:
+        return "Wallet address is required."
+    if not selected_account_id and len(accounts) >= MAX_ACCOUNTS_PER_USER:
+        return ACCOUNT_LIMIT_MESSAGE
+
+    wallet_key = normalize_account_key(clean_wallet)
+    for account in accounts:
+        account_id = str(account.get("account_id", ""))
+        if selected_account_id and account_id == str(selected_account_id):
+            continue
+        if normalize_account_key(account.get("wallet_address", "")) == wallet_key:
+            return "Wallet address already exists. One wallet can only map to one account."
+    return None
 
 
 with tab_map["Account setup"]:
@@ -261,11 +322,26 @@ with tab_map["Account setup"]:
     snapshots = load_resource_snapshots(store)
     snapshot_map = latest_snapshot_by_account(snapshots)
 
-    if st.session_state.pop("account_form_reset_requested", False):
+    if "account_selected_id" not in st.session_state:
+        st.session_state["account_selected_id"] = ""
+    if "account_mode" not in st.session_state:
+        st.session_state["account_mode"] = "create"
+
+    if st.session_state.get("account_reset_requested", False):
         reset_account_form_state()
-    account_success_message = st.session_state.pop("account_form_success_message", "")
-    if account_success_message:
-        st.success(account_success_message)
+        st.session_state["account_selected_id"] = ""
+        st.session_state["account_mode"] = "create"
+        st.session_state["account_reset_requested"] = False
+
+    flash_message = st.session_state.pop("account_flash_message", "")
+    flash_type = st.session_state.pop("account_flash_type", "success")
+    if flash_message:
+        if flash_type == "error":
+            st.error(flash_message)
+        elif flash_type == "warning":
+            st.warning(flash_message)
+        else:
+            st.success(flash_message)
 
     cols = st.columns(4)
     cols[0].metric("Accounts", len(accounts))
@@ -276,59 +352,69 @@ with tab_map["Account setup"]:
     if len(accounts) >= MAX_ACCOUNTS_PER_USER:
         st.warning(ACCOUNT_LIMIT_MESSAGE)
 
-    account_choices = ["Create new account"] + [f"{item.get('account_name', '')} | {item.get('wallet_address', '')}" for item in accounts]
-    selected_account_label = st.selectbox("Account action", account_choices, key="account_action_select")
-    selected_account = None
-    if selected_account_label != "Create new account":
-        selected_index = account_choices.index(selected_account_label) - 1
-        selected_account = accounts[selected_index]
+    account_options = {"Create new account": ""}
+    account_options.update({account_option_label(account): str(account.get("account_id", "")) for account in accounts})
+    selected_label = st.selectbox("Account action", list(account_options.keys()), key="account_action_select")
+    selected_account_id = account_options[selected_label]
+    selected_account = find_account_by_id(accounts, selected_account_id)
 
-    if selected_account and st.session_state.get("account_loaded_id") != selected_account.get("account_id"):
-        st.session_state["account_form_name"] = selected_account.get("account_name", "")
-        st.session_state["account_form_wallet"] = selected_account.get("wallet_address", "")
-        st.session_state["account_form_active"] = bool(selected_account.get("active", True))
-        st.session_state["account_form_note"] = selected_account.get("note", "")
-        st.session_state["account_loaded_id"] = selected_account.get("account_id")
-    elif not selected_account and st.session_state.get("account_loaded_id"):
-        st.session_state["account_form_name"] = ""
-        st.session_state["account_form_wallet"] = ""
-        st.session_state["account_form_active"] = True
-        st.session_state["account_form_note"] = ""
-        st.session_state["account_loaded_id"] = ""
+    if selected_account_id != st.session_state.get("account_selected_id", ""):
+        st.session_state["account_selected_id"] = selected_account_id
+        st.session_state["account_mode"] = "edit" if selected_account else "create"
+        set_account_form_from_account(selected_account)
 
-    with st.form("account_form"):
-        account_name = st.text_input("Account name", key="account_form_name", placeholder="")
-        wallet_address = st.text_input("Wallet address", key="account_form_wallet", placeholder="")
-        active = st.checkbox("Active", value=True, key="account_form_active")
-        note = st.text_input("Note", key="account_form_note", placeholder="")
-        is_editing = selected_account is not None
-        submitted = st.form_submit_button(
-            "Save account" if is_editing else "Add account",
-            type="primary",
-            disabled=(not is_editing and len(accounts) >= MAX_ACCOUNTS_PER_USER),
-        )
-        if submitted:
-            try:
-                upsert_account(
-                    store,
-                    account_name,
-                    wallet_address,
-                    active,
-                    note,
-                    account_id=selected_account.get("account_id") if selected_account else None,
-                )
-                request_account_form_reset("Account saved.")
+    is_editing = bool(st.session_state.get("account_selected_id"))
+    selected_account = find_account_by_id(accounts, st.session_state.get("account_selected_id", ""))
+    if is_editing and selected_account is None:
+        st.session_state["account_selected_id"] = ""
+        st.session_state["account_mode"] = "create"
+        set_account_form_from_account(None)
+        is_editing = False
+
+    with st.container(border=True):
+        st.markdown("**Selected account**" if is_editing else "**Create new account**")
+        if is_editing and selected_account:
+            st.caption(f"{selected_account.get('account_name', '')} - {selected_account.get('wallet_address', '')}")
+
+        with st.form("account_form"):
+            account_name = st.text_input("Account name", key="account_form_name", placeholder="")
+            wallet_address = st.text_input("Wallet address", key="account_form_wallet", placeholder="")
+            active = st.checkbox("Active", value=True, key="account_form_active")
+            note = st.text_input("Note", key="account_form_note", placeholder="")
+            submitted = st.form_submit_button(
+                "Save account" if is_editing else "Add account",
+                type="primary",
+                disabled=(not is_editing and len(accounts) >= MAX_ACCOUNTS_PER_USER),
+            )
+            if submitted:
+                validation_error = validate_account_form(accounts, account_name, wallet_address, st.session_state.get("account_selected_id", ""))
+                if validation_error:
+                    st.error(validation_error)
+                else:
+                    try:
+                        upsert_account(
+                            store,
+                            account_name,
+                            wallet_address,
+                            active,
+                            note,
+                            account_id=st.session_state.get("account_selected_id") or None,
+                        )
+                        queue_account_reset("Account saved.")
+                        st.rerun()
+                    except Exception as error:
+                        st.error(f"Save failed: {error}")
+
+        if is_editing and selected_account:
+            st.divider()
+            st.markdown("**Delete selected account**")
+            st.caption(f"Selected: {selected_account.get('account_name', '')}")
+            st.caption("Deleting an account does not remove historical resource snapshots in this pilot build.")
+            confirm_delete = st.checkbox("Confirm delete selected account", key="account_confirm_delete")
+            if st.button("Delete selected account", type="secondary", disabled=not confirm_delete, key="account_delete_button"):
+                deleted = delete_account(store, str(st.session_state.get("account_selected_id", "")))
+                queue_account_reset("Account deleted." if deleted else "Account was already missing.", "success" if deleted else "warning")
                 st.rerun()
-            except Exception as error:
-                st.error(f"Save failed: {error}")
-
-    if selected_account:
-        st.caption("Deleting an account does not remove historical resource snapshots in this pilot build.")
-        confirm_delete = st.checkbox("Confirm delete selected account", key="account_confirm_delete")
-        if st.button("Delete selected account", type="secondary", disabled=not confirm_delete, key="account_delete_button"):
-            deleted = delete_account(store, str(selected_account.get("account_id", "")))
-            request_account_form_reset("Account deleted." if deleted else "Account was already missing.")
-            st.rerun()
 
     if accounts:
         account_rows = []

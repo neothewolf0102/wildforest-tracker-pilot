@@ -32,7 +32,7 @@ class MobileOcrPasteParserTest(unittest.TestCase):
         self.assertTrue(parsed["warnings"])
 
     def test_extra_numbers_warns_and_uses_first_three(self) -> None:
-        parsed = parse_mobile_ocr_paste("10 054 2 221.50 280 486 999", PROFILE)
+        parsed = parse_mobile_ocr_paste("Wild Shards 10 054 WF 2 221.50 Gold 280 486 Extra 999", PROFILE)
         self.assertEqual(parsed["values"]["wild_shards"], 10054)
         self.assertEqual(parsed["values"]["wf"], 2221.50)
         self.assertEqual(parsed["values"]["gold"], 280486)

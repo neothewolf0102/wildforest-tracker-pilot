@@ -5,7 +5,6 @@ from uuid import uuid4
 ACCOUNTS_FILE = "accounts.json"
 MAX_ACCOUNTS_PER_USER = 10
 ACCOUNT_LIMIT_MESSAGE = "Pilot limit reached: maximum 10 accounts per user."
-DUPLICATE_ACCOUNT_NAME_MESSAGE = "Account name already exists. Each account name must be unique."
 DUPLICATE_WALLET_MESSAGE = "Wallet address already exists. One wallet can only map to one account."
 
 
@@ -25,23 +24,16 @@ def _normalize_text(value: str) -> str:
     return str(value or "").strip()
 
 
-def _normalize_key(value: str) -> str:
-    return _normalize_text(value).casefold()
-
-
 def _normalize_wallet(value: str) -> str:
     return _normalize_text(value).casefold()
 
 
 def validate_account_unique(accounts: list[dict], account_name: str, wallet_address: str, account_id: str | None = None) -> None:
-    account_name_key = _normalize_key(account_name)
     wallet_key = _normalize_wallet(wallet_address)
     for item in accounts:
         existing_id = str(item.get("account_id", ""))
         if account_id and existing_id == str(account_id):
             continue
-        if _normalize_key(item.get("account_name", "")) == account_name_key:
-            raise ValueError(DUPLICATE_ACCOUNT_NAME_MESSAGE)
         if wallet_key and _normalize_wallet(item.get("wallet_address", "")) == wallet_key:
             raise ValueError(DUPLICATE_WALLET_MESSAGE)
 

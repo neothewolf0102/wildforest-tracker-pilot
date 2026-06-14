@@ -3,8 +3,8 @@ from __future__ import annotations
 from uuid import uuid4
 
 ACCOUNTS_FILE = "accounts.json"
-MAX_ACCOUNTS_PER_USER = 5
-ACCOUNT_LIMIT_MESSAGE = "Pilot limit reached: maximum 5 accounts per user."
+MAX_ACCOUNTS_PER_USER = 10
+ACCOUNT_LIMIT_MESSAGE = "Pilot limit reached: maximum 10 accounts per user."
 DUPLICATE_ACCOUNT_NAME_MESSAGE = "Account name already exists. Each account name must be unique."
 DUPLICATE_WALLET_MESSAGE = "Wallet address already exists. One wallet can only map to one account."
 

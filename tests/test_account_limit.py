@@ -17,18 +17,19 @@ class FakeStore:
 
 
 class AccountLimitTest(unittest.TestCase):
-    def test_user_can_create_up_to_five_accounts(self) -> None:
+    def test_user_can_create_up_to_max_accounts(self) -> None:
         store = FakeStore()
         for index in range(MAX_ACCOUNTS_PER_USER):
             upsert_account(store, f"Account {index + 1}", f"0x{index + 1:040d}")
         self.assertEqual(len(store.files["accounts.json"]), MAX_ACCOUNTS_PER_USER)
+        self.assertEqual(MAX_ACCOUNTS_PER_USER, 10)
 
-    def test_sixth_account_is_blocked_with_required_message(self) -> None:
+    def test_next_account_is_blocked_with_required_message(self) -> None:
         store = FakeStore()
         for index in range(MAX_ACCOUNTS_PER_USER):
             upsert_account(store, f"Account {index + 1}", f"0x{index + 1:040d}")
         with self.assertRaisesRegex(ValueError, ACCOUNT_LIMIT_MESSAGE):
-            upsert_account(store, "Account 6", "0x9999999999999999999999999999999999999999")
+            upsert_account(store, "Account 11", "0x9999999999999999999999999999999999999999")
 
 
 if __name__ == "__main__":

@@ -19,6 +19,7 @@ from services.level_service import (
     build_multi_account_upgrade_plan,
     load_level_cost_config,
 )
+from services.mobile_ocr_service import MOBILE_OCR_LAYOUT_PROFILES, parse_mobile_ocr_paste
 from services.resource_service import latest_snapshot_by_account, load_resource_snapshots, upsert_manual_resource_snapshot
 from services.ticket_service import load_tickets, ticket_by_account, upsert_ticket
 from ui.pilot_auth import current_store, render_login_gate, render_user_bar
@@ -292,16 +293,72 @@ with tab_map["Account setup"]:
         st.info("Add an active account before saving resources.")
     else:
         account_options = {item["account_name"]: item["account_id"] for item in active}
-        with st.form("resource_snapshot_form"):
-            resource_account = st.selectbox("Account", list(account_options.keys()))
-            gold = st.number_input("Gold", min_value=0, step=1)
-            shards = st.number_input("Shards", min_value=0, step=1)
-            wf = st.number_input("WF", min_value=0.0, step=0.01, format="%.2f")
-            resource_note = st.text_input("Resource note")
-            if st.form_submit_button("Save resource snapshot", type="primary"):
-                upsert_manual_resource_snapshot(store, account_options[resource_account], int(gold), int(shards), float(wf), resource_note)
-                st.success("Resource snapshot saved.")
-                st.rerun()
+        manual_tab, mobile_ocr_tab = st.tabs(["Manual Entry", "Mobile OCR Paste"])
+
+        with manual_tab:
+            with st.form("resource_snapshot_form"):
+                resource_account = st.selectbox("Account", list(account_options.keys()))
+                shards = st.number_input("Wild Shards", min_value=0, step=1)
+                wf = st.number_input("WF", min_value=0.0, step=0.01, format="%.2f")
+                gold = st.number_input("Gold", min_value=0, step=1)
+                resource_note = st.text_input("Resource note")
+                if st.form_submit_button("Save resource snapshot", type="primary"):
+                    upsert_manual_resource_snapshot(store, account_options[resource_account], int(gold), int(shards), float(wf), resource_note)
+                    st.success("Resource snapshot saved.")
+                    st.rerun()
+
+        with mobile_ocr_tab:
+            ocr_account = st.selectbox("Account", list(account_options.keys()), key="mobile_ocr_account")
+            profile_key = st.selectbox(
+                "Layout profile",
+                list(MOBILE_OCR_LAYOUT_PROFILES.keys()),
+                format_func=lambda key: MOBILE_OCR_LAYOUT_PROFILES[key]["display_name"],
+                key="mobile_ocr_profile",
+            )
+            raw_paste_text = st.text_area("Paste phone OCR text here", height=140, key="mobile_ocr_raw_text")
+
+            if "mobile_ocr_wild_shards" not in st.session_state:
+                st.session_state["mobile_ocr_wild_shards"] = 0
+            if "mobile_ocr_wf" not in st.session_state:
+                st.session_state["mobile_ocr_wf"] = 0.0
+            if "mobile_ocr_gold" not in st.session_state:
+                st.session_state["mobile_ocr_gold"] = 0
+
+            if st.button("Parse & Fill", key="mobile_ocr_parse_button"):
+                parsed = parse_mobile_ocr_paste(raw_paste_text, profile_key)
+                values = parsed["values"]
+                st.session_state["mobile_ocr_wild_shards"] = int(values.get("wild_shards") or 0)
+                st.session_state["mobile_ocr_wf"] = float(values.get("wf") or 0.0)
+                st.session_state["mobile_ocr_gold"] = int(values.get("gold") or 0)
+                st.session_state["mobile_ocr_parse_warnings"] = parsed["warnings"]
+                st.session_state["mobile_ocr_numbers_found"] = parsed["numbers_found"]
+
+            for warning in st.session_state.get("mobile_ocr_parse_warnings", []):
+                st.warning(warning)
+            if st.session_state.get("mobile_ocr_numbers_found"):
+                st.caption(f"Numbers found: {st.session_state['mobile_ocr_numbers_found']}")
+
+            preview_cols = st.columns(3)
+            wild_shards = preview_cols[0].number_input("Wild Shards", min_value=0, step=1, key="mobile_ocr_wild_shards")
+            wf_balance = preview_cols[1].number_input("WF", min_value=0.0, step=0.01, format="%.2f", key="mobile_ocr_wf")
+            gold_balance = preview_cols[2].number_input("Gold", min_value=0, step=1, key="mobile_ocr_gold")
+
+            if st.button("Save Resource Snapshot", type="primary", key="mobile_ocr_save_snapshot", disabled=not bool(ocr_account)):
+                if not raw_paste_text.strip():
+                    st.warning("Pasted OCR text is empty.")
+                else:
+                    upsert_manual_resource_snapshot(
+                        store,
+                        account_options[ocr_account],
+                        int(gold_balance),
+                        int(wild_shards),
+                        float(wf_balance),
+                        "Mobile OCR Paste",
+                        source="mobile_ocr_paste",
+                        raw_paste_text=raw_paste_text,
+                    )
+                    st.success("Resource snapshot saved from Mobile OCR Paste.")
+                    st.rerun()
 
 with tab_map["Ticket dashboard"]:
     st.subheader("Ticket dashboard")

@@ -11,7 +11,7 @@ import streamlit as st
 
 from engines.level_cost_engine import MISSING_LEVEL_COST_MESSAGE, MissingLevelCostConfigurationError
 from engines.ticket_engine import DEFAULT_TICKET_DURATION_DAYS, days_until_expiry, ticket_status
-from services.account_service import ACCOUNT_LIMIT_MESSAGE, MAX_ACCOUNTS_PER_USER, active_accounts, load_accounts, upsert_account
+from services.account_service import ACCOUNT_LIMIT_MESSAGE, MAX_ACCOUNTS_PER_USER, active_accounts, delete_account, load_accounts, upsert_account
 from services.daily_action_service import load_daily_actions, upsert_daily_action
 from services.kpi_service import build_kpi_summary
 from services.level_service import (
@@ -255,19 +255,72 @@ with tab_map["Account setup"]:
     if len(accounts) >= MAX_ACCOUNTS_PER_USER:
         st.warning(ACCOUNT_LIMIT_MESSAGE)
 
+    account_choices = ["Create new account"] + [f"{item.get('account_name', '')} | {item.get('wallet_address', '')}" for item in accounts]
+    selected_account_label = st.selectbox("Account action", account_choices, key="account_action_select")
+    selected_account = None
+    if selected_account_label != "Create new account":
+        selected_index = account_choices.index(selected_account_label) - 1
+        selected_account = accounts[selected_index]
+
+    if selected_account and st.session_state.get("account_loaded_id") != selected_account.get("account_id"):
+        st.session_state["account_form_name"] = selected_account.get("account_name", "")
+        st.session_state["account_form_wallet"] = selected_account.get("wallet_address", "")
+        st.session_state["account_form_active"] = bool(selected_account.get("active", True))
+        st.session_state["account_form_note"] = selected_account.get("note", "")
+        st.session_state["account_loaded_id"] = selected_account.get("account_id")
+    elif not selected_account and st.session_state.get("account_loaded_id"):
+        st.session_state["account_form_name"] = ""
+        st.session_state["account_form_wallet"] = ""
+        st.session_state["account_form_active"] = True
+        st.session_state["account_form_note"] = ""
+        st.session_state["account_loaded_id"] = ""
+
     with st.form("account_form"):
-        account_name = st.text_input("Account name")
-        wallet_address = st.text_input("Wallet address")
-        active = st.checkbox("Active", value=True)
-        note = st.text_input("Note")
-        submitted = st.form_submit_button("Save account", type="primary", disabled=len(accounts) >= MAX_ACCOUNTS_PER_USER)
+        account_name = st.text_input("Account name", key="account_form_name", placeholder="")
+        wallet_address = st.text_input("Wallet address", key="account_form_wallet", placeholder="")
+        active = st.checkbox("Active", value=True, key="account_form_active")
+        note = st.text_input("Note", key="account_form_note", placeholder="")
+        is_editing = selected_account is not None
+        submitted = st.form_submit_button(
+            "Save account" if is_editing else "Add account",
+            type="primary",
+            disabled=(not is_editing and len(accounts) >= MAX_ACCOUNTS_PER_USER),
+        )
         if submitted:
             try:
-                upsert_account(store, account_name, wallet_address, active, note)
+                upsert_account(
+                    store,
+                    account_name,
+                    wallet_address,
+                    active,
+                    note,
+                    account_id=selected_account.get("account_id") if selected_account else None,
+                )
+                st.session_state["account_form_name"] = ""
+                st.session_state["account_form_wallet"] = ""
+                st.session_state["account_form_active"] = True
+                st.session_state["account_form_note"] = ""
+                st.session_state["account_loaded_id"] = ""
+                st.session_state["account_action_select"] = "Create new account"
                 st.success("Account saved.")
                 st.rerun()
             except Exception as error:
                 st.error(f"Save failed: {error}")
+
+    if selected_account:
+        st.caption("Deleting an account does not remove historical resource snapshots in this pilot build.")
+        confirm_delete = st.checkbox("Confirm delete selected account", key="account_confirm_delete")
+        if st.button("Delete selected account", type="secondary", disabled=not confirm_delete, key="account_delete_button"):
+            deleted = delete_account(store, str(selected_account.get("account_id", "")))
+            st.session_state["account_form_name"] = ""
+            st.session_state["account_form_wallet"] = ""
+            st.session_state["account_form_active"] = True
+            st.session_state["account_form_note"] = ""
+            st.session_state["account_loaded_id"] = ""
+            st.session_state["account_action_select"] = "Create new account"
+            st.session_state["account_confirm_delete"] = False
+            st.success("Account deleted." if deleted else "Account was already missing.")
+            st.rerun()
 
     if accounts:
         account_rows = []

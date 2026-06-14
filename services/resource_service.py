@@ -25,6 +25,17 @@ def _snapshot_timestamp(snapshot: dict) -> datetime | None:
     return None
 
 
+def _with_balance_aliases(snapshot: dict) -> dict:
+    normalized = dict(snapshot)
+    if normalized.get("gold") in (None, ""):
+        normalized["gold"] = normalized.get("gold_balance", 0)
+    if normalized.get("shards") in (None, ""):
+        normalized["shards"] = normalized.get("wild_shards_balance", 0)
+    if normalized.get("wf") in (None, ""):
+        normalized["wf"] = normalized.get("wf_balance", 0.0)
+    return normalized
+
+
 def latest_snapshot_by_account(snapshots: list[dict]) -> dict[str, dict]:
     latest: dict[str, dict] = {}
     latest_meta: dict[str, tuple[datetime | None, int]] = {}
@@ -35,7 +46,7 @@ def latest_snapshot_by_account(snapshots: list[dict]) -> dict[str, dict]:
         timestamp = _snapshot_timestamp(item)
         current_meta = latest_meta.get(account_id)
         if current_meta is None:
-            latest[account_id] = item
+            latest[account_id] = _with_balance_aliases(item)
             latest_meta[account_id] = (timestamp, index)
             continue
 
@@ -49,7 +60,7 @@ def latest_snapshot_by_account(snapshots: list[dict]) -> dict[str, dict]:
             should_replace = index >= current_index
 
         if should_replace:
-            latest[account_id] = item
+            latest[account_id] = _with_balance_aliases(item)
             latest_meta[account_id] = (timestamp, index)
     return latest
 

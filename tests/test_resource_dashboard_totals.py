@@ -29,6 +29,14 @@ class ResourceDashboardTotalsTest(unittest.TestCase):
         latest = latest_snapshot_by_account(snapshots)
         self.assertEqual(latest["a1"]["gold"], 500)
 
+    def test_latest_snapshot_adds_balance_aliases_for_legacy_rows(self) -> None:
+        latest = latest_snapshot_by_account([
+            {"account_id": "a1", "snapshot_datetime": "2026-06-14T10:00:00+00:00", "gold_balance": 200, "wild_shards_balance": 20, "wf_balance": 2.25},
+        ])
+        self.assertEqual(latest["a1"]["gold"], 200)
+        self.assertEqual(latest["a1"]["shards"], 20)
+        self.assertEqual(latest["a1"]["wf"], 2.25)
+
     def test_dashboard_totals_use_latest_snapshot_per_current_account_only(self) -> None:
         accounts = [{"account_id": "a1"}, {"account_id": "a2"}]
         snapshots = [

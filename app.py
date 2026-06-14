@@ -240,11 +240,32 @@ def remove_level_unit(index: int) -> None:
     st.session_state["pilot_level_unit_blocks"] = [unit for idx, unit in enumerate(units) if idx != index]
 
 
+def reset_account_form_state() -> None:
+    st.session_state["account_form_name"] = ""
+    st.session_state["account_form_wallet"] = ""
+    st.session_state["account_form_active"] = True
+    st.session_state["account_form_note"] = ""
+    st.session_state["account_loaded_id"] = ""
+    st.session_state["account_action_select"] = "Create new account"
+    st.session_state["account_confirm_delete"] = False
+
+
+def request_account_form_reset(message: str) -> None:
+    st.session_state["account_form_reset_requested"] = True
+    st.session_state["account_form_success_message"] = message
+
+
 with tab_map["Account setup"]:
     st.subheader("Account setup")
     accounts = load_accounts(store)
     snapshots = load_resource_snapshots(store)
     snapshot_map = latest_snapshot_by_account(snapshots)
+
+    if st.session_state.pop("account_form_reset_requested", False):
+        reset_account_form_state()
+    account_success_message = st.session_state.pop("account_form_success_message", "")
+    if account_success_message:
+        st.success(account_success_message)
 
     cols = st.columns(4)
     cols[0].metric("Accounts", len(accounts))
@@ -296,13 +317,7 @@ with tab_map["Account setup"]:
                     note,
                     account_id=selected_account.get("account_id") if selected_account else None,
                 )
-                st.session_state["account_form_name"] = ""
-                st.session_state["account_form_wallet"] = ""
-                st.session_state["account_form_active"] = True
-                st.session_state["account_form_note"] = ""
-                st.session_state["account_loaded_id"] = ""
-                st.session_state["account_action_select"] = "Create new account"
-                st.success("Account saved.")
+                request_account_form_reset("Account saved.")
                 st.rerun()
             except Exception as error:
                 st.error(f"Save failed: {error}")
@@ -312,14 +327,7 @@ with tab_map["Account setup"]:
         confirm_delete = st.checkbox("Confirm delete selected account", key="account_confirm_delete")
         if st.button("Delete selected account", type="secondary", disabled=not confirm_delete, key="account_delete_button"):
             deleted = delete_account(store, str(selected_account.get("account_id", "")))
-            st.session_state["account_form_name"] = ""
-            st.session_state["account_form_wallet"] = ""
-            st.session_state["account_form_active"] = True
-            st.session_state["account_form_note"] = ""
-            st.session_state["account_loaded_id"] = ""
-            st.session_state["account_action_select"] = "Create new account"
-            st.session_state["account_confirm_delete"] = False
-            st.success("Account deleted." if deleted else "Account was already missing.")
+            request_account_form_reset("Account deleted." if deleted else "Account was already missing.")
             st.rerun()
 
     if accounts:

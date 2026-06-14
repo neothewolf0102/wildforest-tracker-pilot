@@ -3,8 +3,9 @@ from __future__ import annotations
 from uuid import uuid4
 
 ACCOUNTS_FILE = "accounts.json"
-MAX_ACCOUNTS_PER_USER = 10
-ACCOUNT_LIMIT_MESSAGE = "Pilot limit reached: maximum 10 accounts per user."
+NORMAL_ACCOUNTS_PER_USER = 5
+MAX_ACCOUNTS_PER_USER = NORMAL_ACCOUNTS_PER_USER
+ACCOUNT_LIMIT_MESSAGE = "Pilot limit reached: maximum 5 accounts per user."
 DUPLICATE_WALLET_MESSAGE = "Wallet address already exists. One wallet can only map to one account."
 
 
@@ -38,7 +39,15 @@ def validate_account_unique(accounts: list[dict], account_name: str, wallet_addr
             raise ValueError(DUPLICATE_WALLET_MESSAGE)
 
 
-def upsert_account(store, account_name: str, wallet_address: str, active: bool = True, note: str = "", account_id: str | None = None) -> dict:
+def upsert_account(
+    store,
+    account_name: str,
+    wallet_address: str,
+    active: bool = True,
+    note: str = "",
+    account_id: str | None = None,
+    bypass_account_limit: bool = False,
+) -> dict:
     clean_name = _normalize_text(account_name)
     clean_wallet = _normalize_text(wallet_address)
     if not clean_name:
@@ -48,7 +57,7 @@ def upsert_account(store, account_name: str, wallet_address: str, active: bool =
 
     accounts = load_accounts(store)
     existing_index = next((index for index, item in enumerate(accounts) if str(item.get("account_id", "")) == str(account_id or "")), None)
-    if existing_index is None and len(accounts) >= MAX_ACCOUNTS_PER_USER:
+    if existing_index is None and not bypass_account_limit and len(accounts) >= NORMAL_ACCOUNTS_PER_USER:
         raise ValueError(ACCOUNT_LIMIT_MESSAGE)
 
     validate_account_unique(accounts, clean_name, clean_wallet, account_id)

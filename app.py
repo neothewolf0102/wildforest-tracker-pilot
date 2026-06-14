@@ -22,7 +22,7 @@ from services.level_service import (
 from services.mobile_ocr_service import MOBILE_OCR_LAYOUT_PROFILES, parse_mobile_ocr_paste
 from services.resource_service import latest_snapshot_by_account, load_resource_snapshots, upsert_manual_resource_snapshot
 from services.ticket_service import load_tickets, ticket_by_account, upsert_ticket
-from ui.pilot_auth import current_store, render_login_gate, render_user_bar
+from ui.pilot_auth import current_store, current_user_email, is_super_admin, render_login_gate, render_user_bar
 
 PRICE_REFRESH_SECONDS = 1800
 BANGKOK_TZ = timezone(timedelta(hours=7), name="UTC+7")
@@ -298,14 +298,20 @@ def queue_account_reset(message: str, flash_type: str = "success") -> None:
     st.session_state["account_mode"] = "create"
 
 
-def validate_account_form(accounts: list[dict], account_name: str, wallet_address: str, selected_account_id: str) -> str | None:
+def validate_account_form(
+    accounts: list[dict],
+    account_name: str,
+    wallet_address: str,
+    selected_account_id: str,
+    bypass_account_limit: bool = False,
+) -> str | None:
     clean_name = normalize_account_text(account_name)
     clean_wallet = normalize_account_text(wallet_address)
     if not clean_name:
         return "Account name is required."
     if not clean_wallet:
         return "Wallet address is required."
-    if not selected_account_id and len(accounts) >= MAX_ACCOUNTS_PER_USER:
+    if not selected_account_id and not bypass_account_limit and len(accounts) >= MAX_ACCOUNTS_PER_USER:
         return ACCOUNT_LIMIT_MESSAGE
 
     wallet_key = normalize_account_key(clean_wallet)
@@ -323,6 +329,13 @@ with tab_map["Account setup"]:
     accounts = load_accounts(store)
     snapshots = load_resource_snapshots(store)
     snapshot_map = latest_snapshot_by_account(snapshots)
+    super_admin = is_super_admin(current_user_email())
+    account_limit_reached = not super_admin and len(accounts) >= MAX_ACCOUNTS_PER_USER
+    current_account_snapshots = [
+        snapshot_map[str(account.get("account_id"))]
+        for account in accounts
+        if str(account.get("account_id")) in snapshot_map
+    ]
 
     if "account_selected_id" not in st.session_state:
         st.session_state["account_selected_id"] = ""
@@ -345,13 +358,19 @@ with tab_map["Account setup"]:
         else:
             st.success(flash_message)
 
-    cols = st.columns(4)
-    cols[0].metric("Accounts", len(accounts))
-    cols[1].metric("Capacity", f"{len(accounts)}/{MAX_ACCOUNTS_PER_USER}")
-    cols[2].metric("Total gold", f"{sum(int(item.get('gold', 0) or 0) for item in snapshot_map.values()):,}")
-    cols[3].metric("Total shards", f"{sum(int(item.get('shards', 0) or 0) for item in snapshot_map.values()):,}")
+    total_gold = sum(int(snapshot.get("gold", 0) or 0) for snapshot in current_account_snapshots)
+    total_shards = sum(int(snapshot.get("shards", 0) or 0) for snapshot in current_account_snapshots)
+    total_wf = sum(safe_float(snapshot.get("wf"), 0.0) for snapshot in current_account_snapshots)
+    capacity_label = f"{len(accounts)}/unlimited" if super_admin else f"{len(accounts)}/{MAX_ACCOUNTS_PER_USER}"
 
-    if len(accounts) >= MAX_ACCOUNTS_PER_USER:
+    cols = st.columns(5)
+    cols[0].metric("Accounts", len(accounts))
+    cols[1].metric("Capacity", capacity_label)
+    cols[2].metric("Total gold", f"{total_gold:,}")
+    cols[3].metric("Total shards", f"{total_shards:,}")
+    cols[4].metric("Total WF", f"{total_wf:,.2f}")
+
+    if account_limit_reached:
         st.warning(ACCOUNT_LIMIT_MESSAGE)
 
     account_options = {"Create new account": ""}
@@ -386,10 +405,16 @@ with tab_map["Account setup"]:
             submitted = st.form_submit_button(
                 "Save account" if is_editing else "Add account",
                 type="primary",
-                disabled=(not is_editing and len(accounts) >= MAX_ACCOUNTS_PER_USER),
+                disabled=(not is_editing and account_limit_reached),
             )
             if submitted:
-                validation_error = validate_account_form(accounts, account_name, wallet_address, st.session_state.get("account_selected_id", ""))
+                validation_error = validate_account_form(
+                    accounts,
+                    account_name,
+                    wallet_address,
+                    st.session_state.get("account_selected_id", ""),
+                    bypass_account_limit=super_admin,
+                )
                 if validation_error:
                     st.error(validation_error)
                 else:
@@ -401,6 +426,7 @@ with tab_map["Account setup"]:
                             active,
                             note,
                             account_id=st.session_state.get("account_selected_id") or None,
+                            bypass_account_limit=super_admin,
                         )
                         queue_account_reset("Account saved.")
                         st.rerun()

@@ -28,7 +28,7 @@ class AccountLimitTest(unittest.TestCase):
         for index in range(MAX_ACCOUNTS_PER_USER):
             upsert_account(store, f"Account {index + 1}", f"0x{index + 1:040d}")
         self.assertEqual(len(store.files["accounts.json"]), MAX_ACCOUNTS_PER_USER)
-        self.assertEqual(MAX_ACCOUNTS_PER_USER, 10)
+        self.assertEqual(MAX_ACCOUNTS_PER_USER, 5)
 
     def test_next_account_is_blocked_with_required_message(self) -> None:
         store = FakeStore()
@@ -36,6 +36,17 @@ class AccountLimitTest(unittest.TestCase):
             upsert_account(store, f"Account {index + 1}", f"0x{index + 1:040d}")
         with self.assertRaisesRegex(ValueError, ACCOUNT_LIMIT_MESSAGE):
             upsert_account(store, "Account 11", "0x9999999999999999999999999999999999999999")
+
+    def test_super_admin_bypass_can_create_beyond_max_accounts(self) -> None:
+        store = FakeStore()
+        for index in range(MAX_ACCOUNTS_PER_USER + 2):
+            upsert_account(
+                store,
+                f"Account {index + 1}",
+                f"0x{index + 1:040d}",
+                bypass_account_limit=True,
+            )
+        self.assertEqual(len(store.files["accounts.json"]), MAX_ACCOUNTS_PER_USER + 2)
 
     def test_duplicate_account_name_is_allowed(self) -> None:
         store = FakeStore()

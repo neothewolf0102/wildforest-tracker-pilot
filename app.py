@@ -248,7 +248,9 @@ def short_wallet(wallet_address: str) -> str:
 
 
 def account_option_label(account: dict) -> str:
-    return f"{account.get('account_name', '')} ({short_wallet(account.get('wallet_address', ''))})"
+    account_id = str(account.get("account_id", ""))
+    suffix = account_id[:8] if account_id else "new"
+    return f"{account.get('account_name', '')} ({short_wallet(account.get('wallet_address', ''))}) [{suffix}]"
 
 
 def normalize_account_text(value: object) -> str:
@@ -439,7 +441,7 @@ with tab_map["Account setup"]:
     if not active:
         st.info("Add an active account before saving resources.")
     else:
-        account_options = {item["account_name"]: item["account_id"] for item in active}
+        account_options = {account_option_label(item): item["account_id"] for item in active}
         manual_tab, mobile_ocr_tab = st.tabs(["Manual Entry", "Mobile OCR Paste"])
 
         with manual_tab:

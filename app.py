@@ -11,6 +11,7 @@ import streamlit as st
 
 from engines.level_cost_engine import MISSING_LEVEL_COST_MESSAGE, MissingLevelCostConfigurationError
 from engines.ticket_engine import DEFAULT_TICKET_DURATION_DAYS, days_until_expiry, ticket_status
+from services.account_display import account_display_lookup, account_display_name
 from services.account_service import ACCOUNT_LIMIT_MESSAGE, MAX_ACCOUNTS_PER_USER, active_accounts, delete_account, load_accounts, upsert_account
 from services.daily_action_service import load_daily_actions, upsert_daily_action
 from services.kpi_service import build_kpi_summary
@@ -70,7 +71,12 @@ def save_earnings(rows: list[dict]) -> None:
 
 
 def account_name_by_id(accounts: list[dict]) -> dict[str, str]:
-    return {str(item.get("account_id")): str(item.get("account_name", "")) for item in accounts}
+    labels = account_display_lookup(accounts)
+    for account in accounts:
+        key = account_storage_key(account)
+        if key:
+            labels.setdefault(key, account_display_name(account))
+    return labels
 
 
 def format_int(value: int | float | str) -> str:
@@ -248,9 +254,48 @@ def short_wallet(wallet_address: str) -> str:
 
 
 def account_option_label(account: dict) -> str:
-    account_id = str(account.get("account_id", ""))
+    account_id = account_storage_key(account)
     suffix = account_id[:8] if account_id else "new"
-    return f"{account.get('account_name', '')} ({short_wallet(account.get('wallet_address', ''))}) [{suffix}]"
+    wallet = short_wallet(account.get("wallet_address", ""))
+    wallet_label = f" ({wallet})" if wallet else ""
+    return f"{account_display_name(account)}{wallet_label} [{suffix}]"
+
+
+def account_storage_key(account: dict) -> str:
+    return str(account.get("account_id") or account.get("account_name") or "").strip()
+
+
+def account_select_ids(accounts: list[dict]) -> list[str]:
+    return [account_storage_key(account) for account in accounts if account_storage_key(account)]
+
+
+def account_labels_by_key(accounts: list[dict]) -> dict[str, str]:
+    return {account_storage_key(account): account_display_name(account) for account in accounts if account_storage_key(account)}
+
+
+def account_select_label(labels: dict[str, str], account_id: object) -> str:
+    key = str(account_id or "")
+    return labels.get(key, key)
+
+
+def account_display_dataframe(rows: list[dict], accounts: list[dict]) -> pd.DataFrame:
+    table = pd.DataFrame(rows)
+    if table.empty:
+        return table
+
+    labels = account_name_by_id(accounts)
+
+    def row_label(row: pd.Series) -> str:
+        account_id = str(row.get("account_id", "") or "")
+        if account_id and account_id in labels:
+            return labels[account_id]
+        return str(row.get("account_display") or row.get("Account") or row.get("account_name") or account_id)
+
+    if any(column in table.columns for column in ("account_id", "account_display", "account_name", "Account")):
+        table["Account"] = table.apply(row_label, axis=1)
+        table = table.drop(columns=[column for column in ("account_id", "account_display", "account_name") if column in table.columns])
+        table = table[["Account"] + [column for column in table.columns if column != "Account"]]
+    return table
 
 
 def normalize_account_text(value: object) -> str:
@@ -263,7 +308,7 @@ def normalize_account_key(value: object) -> str:
 
 def find_account_by_id(accounts: list[dict], account_id: str) -> dict | None:
     target_id = str(account_id or "")
-    return next((item for item in accounts if str(item.get("account_id", "")) == target_id), None)
+    return next((item for item in accounts if account_storage_key(item) == target_id), None)
 
 
 def reset_account_form_state() -> None:
@@ -271,7 +316,7 @@ def reset_account_form_state() -> None:
     st.session_state["account_form_wallet"] = ""
     st.session_state["account_form_active"] = True
     st.session_state["account_form_note"] = ""
-    st.session_state["account_action_select"] = "Create new account"
+    st.session_state["account_action_select"] = ""
     st.session_state["account_confirm_delete"] = False
 
 
@@ -373,10 +418,16 @@ with tab_map["Account setup"]:
     if account_limit_reached:
         st.warning(ACCOUNT_LIMIT_MESSAGE)
 
-    account_options = {"Create new account": ""}
-    account_options.update({account_option_label(account): str(account.get("account_id", "")) for account in accounts})
-    selected_label = st.selectbox("Account action", list(account_options.keys()), key="account_action_select")
-    selected_account_id = account_options[selected_label]
+    account_action_options = [""] + account_select_ids(accounts)
+    account_action_labels = {account_storage_key(account): account_option_label(account) for account in accounts if account_storage_key(account)}
+    if st.session_state.get("account_action_select") not in account_action_options:
+        st.session_state["account_action_select"] = ""
+    selected_account_id = st.selectbox(
+        "Account action",
+        account_action_options,
+        format_func=lambda account_id: "Create new account" if not account_id else account_action_labels.get(str(account_id), str(account_id)),
+        key="account_action_select",
+    )
     selected_account = find_account_by_id(accounts, selected_account_id)
 
     if selected_account_id != st.session_state.get("account_selected_id", ""):
@@ -395,7 +446,7 @@ with tab_map["Account setup"]:
     with st.container(border=True):
         st.markdown("**Selected account**" if is_editing else "**Create new account**")
         if is_editing and selected_account:
-            st.caption(f"{selected_account.get('account_name', '')} - {selected_account.get('wallet_address', '')}")
+            st.caption(f"{account_display_name(selected_account)} - {selected_account.get('wallet_address', '')}")
 
         with st.form("account_form"):
             account_name = st.text_input("Account name", key="account_form_name", placeholder="")
@@ -436,7 +487,7 @@ with tab_map["Account setup"]:
         if is_editing and selected_account:
             st.divider()
             st.markdown("**Delete selected account**")
-            st.caption(f"Selected: {selected_account.get('account_name', '')}")
+            st.caption(f"Selected: {account_display_name(selected_account)}")
             st.caption("Deleting an account does not remove historical resource snapshots in this pilot build.")
             confirm_delete = st.checkbox("Confirm delete selected account", key="account_confirm_delete")
             if st.button("Delete selected account", type="secondary", disabled=not confirm_delete, key="account_delete_button"):
@@ -449,7 +500,7 @@ with tab_map["Account setup"]:
         for account in accounts:
             snapshot = snapshot_map.get(str(account.get("account_id")), {})
             account_rows.append({
-                "Account": account.get("account_name", ""),
+                "Account": account_display_name(account),
                 "Wallet": account.get("wallet_address", ""),
                 "Active": account.get("active", True),
                 "Gold": snapshot.get("gold", 0),
@@ -467,23 +518,33 @@ with tab_map["Account setup"]:
     if not active:
         st.info("Add an active account before saving resources.")
     else:
-        account_options = {account_option_label(item): item["account_id"] for item in active}
+        account_labels = account_labels_by_key(active)
+        account_ids = account_select_ids(active)
         manual_tab, mobile_ocr_tab = st.tabs(["Manual Entry", "Mobile OCR Paste"])
 
         with manual_tab:
             with st.form("resource_snapshot_form"):
-                resource_account = st.selectbox("Account", list(account_options.keys()))
+                resource_account_id = st.selectbox(
+                    "Account",
+                    account_ids,
+                    format_func=lambda account_id: account_select_label(account_labels, account_id),
+                )
                 shards = st.number_input("Wild Shards", min_value=0, step=1)
                 wf = st.number_input("WF", min_value=0.0, step=0.01, format="%.2f")
                 gold = st.number_input("Gold", min_value=0, step=1)
                 resource_note = st.text_input("Resource note")
                 if st.form_submit_button("Save resource snapshot", type="primary"):
-                    upsert_manual_resource_snapshot(store, account_options[resource_account], int(gold), int(shards), float(wf), resource_note)
+                    upsert_manual_resource_snapshot(store, resource_account_id, int(gold), int(shards), float(wf), resource_note)
                     st.success("Resource snapshot saved.")
                     st.rerun()
 
         with mobile_ocr_tab:
-            ocr_account = st.selectbox("Account", list(account_options.keys()), key="mobile_ocr_account")
+            ocr_account_id = st.selectbox(
+                "Account",
+                account_ids,
+                format_func=lambda account_id: account_select_label(account_labels, account_id),
+                key="mobile_ocr_account",
+            )
             profile_key = st.selectbox(
                 "Layout profile",
                 list(MOBILE_OCR_LAYOUT_PROFILES.keys()),
@@ -518,13 +579,13 @@ with tab_map["Account setup"]:
             wf_balance = preview_cols[1].number_input("WF", min_value=0.0, step=0.01, format="%.2f", key="mobile_ocr_wf")
             gold_balance = preview_cols[2].number_input("Gold", min_value=0, step=1, key="mobile_ocr_gold")
 
-            if st.button("Save Resource Snapshot", type="primary", key="mobile_ocr_save_snapshot", disabled=not bool(ocr_account)):
+            if st.button("Save Resource Snapshot", type="primary", key="mobile_ocr_save_snapshot", disabled=not bool(ocr_account_id)):
                 if not raw_paste_text.strip():
                     st.warning("Pasted OCR text is empty.")
                 else:
                     upsert_manual_resource_snapshot(
                         store,
-                        account_options[ocr_account],
+                        ocr_account_id,
                         int(gold_balance),
                         int(wild_shards),
                         float(wf_balance),
@@ -543,13 +604,18 @@ with tab_map["Ticket dashboard"]:
     if not accounts:
         st.warning("Add an active account first.")
     else:
-        account_options = {item["account_name"]: item["account_id"] for item in accounts}
+        account_labels = account_labels_by_key(accounts)
+        account_ids = account_select_ids(accounts)
         with st.form("ticket_form"):
-            account_name = st.selectbox("Account", list(account_options.keys()))
+            ticket_account_id = st.selectbox(
+                "Account",
+                account_ids,
+                format_func=lambda account_id: account_select_label(account_labels, account_id),
+            )
             purchase_date = st.date_input("Ticket purchase date", value=date.today())
             ticket_price = st.number_input("Ticket price USDT", min_value=0.0, value=1.0, step=0.5, format="%.2f")
             if st.form_submit_button("Save ticket", type="primary"):
-                upsert_ticket(store, account_options[account_name], purchase_date, ticket_price, DEFAULT_TICKET_DURATION_DAYS)
+                upsert_ticket(store, ticket_account_id, purchase_date, ticket_price, DEFAULT_TICKET_DURATION_DAYS)
                 st.success("Ticket saved.")
                 st.rerun()
         rows = []
@@ -557,7 +623,7 @@ with tab_map["Ticket dashboard"]:
             ticket = tickets_by_account.get(str(account.get("account_id")), {})
             expiry = str(ticket.get("ticket_expiry_date", ""))
             rows.append({
-                "Account": account.get("account_name", ""),
+                "Account": account_display_name(account),
                 "Purchase Date": ticket.get("ticket_purchase_date", ""),
                 "Expiry Date": expiry,
                 "Status": ticket_status(expiry),
@@ -573,17 +639,23 @@ with tab_map["Event earning input"]:
     if not accounts:
         st.warning("Add an active account first.")
     else:
-        account_options = {item["account_name"]: item["account_id"] for item in accounts}
+        account_labels = account_labels_by_key(accounts)
+        account_ids = account_select_ids(accounts)
         with st.form("earning_form"):
             earning_date = st.date_input("Event date", value=date.today())
-            account_name = st.selectbox("Account", list(account_options.keys()), key="earning_account")
+            earning_account_id = st.selectbox(
+                "Account",
+                account_ids,
+                format_func=lambda account_id: account_select_label(account_labels, account_id),
+                key="earning_account",
+            )
             leaderboard_wf = st.number_input("Leaderboard WF", min_value=0.0, step=0.01, format="%.2f")
             pve_wf = st.number_input("PvE WF", min_value=0.0, step=0.01, format="%.2f")
             bounty_wf = st.number_input("Bounty WF", min_value=0.0, step=0.01, format="%.2f")
             if st.form_submit_button("Save event earnings", type="primary"):
                 earnings.append({
                     "event_date": earning_date.isoformat(),
-                    "account_id": account_options[account_name],
+                    "account_id": earning_account_id,
                     "leaderboard_wf": float(leaderboard_wf),
                     "pve_wf": float(pve_wf),
                     "bounty_wf": float(bounty_wf),
@@ -773,7 +845,7 @@ with tab_map["Level + Battle Pass Calculator"]:
         st.dataframe(pd.DataFrame(plan["unit_summary"]), hide_index=True, use_container_width=True)
 
         st.markdown("**Recommended Account Moves**")
-        moves_df = pd.DataFrame(plan["recommended_moves"])
+        moves_df = account_display_dataframe(plan["recommended_moves"], accounts)
         if moves_df.empty:
             st.info("No account move can complete the next pending level with current resources.")
         else:
@@ -783,9 +855,9 @@ with tab_map["Level + Battle Pass Calculator"]:
             st.markdown("**Raw unit summary**")
             st.dataframe(pd.DataFrame(plan["raw_unit_summary"]), hide_index=True, use_container_width=True)
             st.markdown("**Detailed allocation**")
-            st.dataframe(pd.DataFrame(plan["allocation_detail"]), hide_index=True, use_container_width=True)
+            st.dataframe(account_display_dataframe(plan["allocation_detail"], accounts), hide_index=True, use_container_width=True)
             st.markdown("**Skipped / unused accounts**")
-            st.dataframe(pd.DataFrame(plan["skipped_accounts"]), hide_index=True, use_container_width=True)
+            st.dataframe(account_display_dataframe(plan["skipped_accounts"], accounts), hide_index=True, use_container_width=True)
             st.caption(plan["earning_assumption"])
 
     st.caption("Level Simulation Mixer, slider allocation, anchor mode, custom optimization, OCR, payment, admin dashboard, and export are locked for Pilot 01.")

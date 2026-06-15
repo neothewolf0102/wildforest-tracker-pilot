@@ -11,6 +11,7 @@ from engines.level_cost_engine import (
     get_level_upgrade_cost,
 )
 from models.level_plan import LevelPlan
+from services.account_display import account_display_name
 from services.resource_service import latest_snapshot_by_account, load_resource_snapshots
 
 NO_RESOURCE_SNAPSHOT_MESSAGE = "No resource snapshot found for this account. Please add resources first."
@@ -82,11 +83,12 @@ def build_account_jump_matrix(accounts: list[dict], resource_snapshots: list[dic
 
     for account in accounts:
         account_id = str(account.get("account_id", ""))
-        account_name = str(account.get("account_name", account_id))
+        account_label = account_display_name(account)
         snapshot = snapshot_map.get(account_id)
         if not snapshot:
             rows.append({
-                "Account": account_name,
+                "account_id": account_id,
+                "Account": account_label,
                 "Unit": unit_name.strip(),
                 "Current Level": int(current_level),
                 "Target Level": int(target_level),
@@ -112,7 +114,8 @@ def build_account_jump_matrix(accounts: list[dict], resource_snapshots: list[dic
         feasible = calculate_max_feasible_level(current_level, target_level, available_gold, available_shards, config)
         can_reach_target = bool(missing["can_upgrade_now"])
         rows.append({
-            "Account": account_name,
+            "account_id": account_id,
+            "Account": account_label,
             "Unit": unit_name.strip(),
             "Current Level": int(current_level),
             "Target Level": int(target_level),
@@ -131,7 +134,7 @@ def build_account_jump_matrix(accounts: list[dict], resource_snapshots: list[dic
             "Status": "Ready" if can_reach_target else "Partial jump available" if feasible["jump_levels"] > 0 else "Insufficient resources",
         })
 
-    rows.sort(key=lambda row: (row["Can Reach Target"] != "Yes", -int(row["Max Jump Level"]), int(row["Missing Gold"]), int(row["Missing Shards"]), row["Account"]))
+    rows.sort(key=lambda row: (row["Can Reach Target"] != "Yes", -int(row["Max Jump Level"]), int(row["Missing Gold"]), int(row["Missing Shards"]), row["account_id"]))
     best = rows[0] if rows else None
     return {
         "unit_name": unit_name.strip(),
@@ -141,6 +144,7 @@ def build_account_jump_matrix(accounts: list[dict], resource_snapshots: list[dic
         "required_shards": required["required_shards"],
         "ready_accounts": sum(1 for row in rows if row["Can Reach Target"] == "Yes"),
         "best_account": best["Account"] if best else "None",
+        "best_account_id": best["account_id"] if best else "",
         "best_max_level": best["Max Jump Level"] if best else int(current_level),
         "rows": rows,
         "earning_assumption": EARNING_ASSUMPTION_TEXT,
@@ -158,6 +162,7 @@ def _resource_accounts(accounts: list[dict], snapshots: list[dict]) -> list[dict
             rows.append({
                 "account_id": account_id,
                 "account_name": str(account.get("account_name", account_id)),
+                "account_display": account_display_name(account),
                 "latest_shards": 0,
                 "latest_golds": 0,
                 "latest_wf": 0.0,
@@ -167,6 +172,7 @@ def _resource_accounts(accounts: list[dict], snapshots: list[dict]) -> list[dict
         rows.append({
             "account_id": account_id,
             "account_name": str(account.get("account_name", account_id)),
+            "account_display": account_display_name(account),
             "latest_shards": int(snapshot.get("shards", 0) or 0),
             "latest_golds": int(snapshot.get("gold", 0) or 0),
             "latest_wf": float(snapshot.get("wf", 0.0) or 0.0),
@@ -254,7 +260,9 @@ def build_multi_account_upgrade_plan(
             unit["levels_gained"] += 1
             allocation_rows.append({
                 "step": step,
+                "account_id": account["account_id"],
                 "account_name": account["account_name"],
+                "account_display": account["account_display"],
                 "unit_name": unit["unit_name"],
                 "from_level": from_level,
                 "to_level": to_level,
@@ -263,9 +271,19 @@ def build_multi_account_upgrade_plan(
                 "account_remaining_shards_after_task": account["latest_shards"],
                 "account_remaining_golds_after_task": account["latest_golds"],
             })
-            move_key = (step if mode == "Manual Priority" else len(move_map) + 1, account["account_name"])
+            move_key = (step if mode == "Manual Priority" else len(move_map) + 1, account["account_id"])
             if move_key not in move_map:
-                move_map[move_key] = {"Step": len(move_map) + 1, "Account": account["account_name"], "Shards Used": 0, "Gold Used": 0, "Levels": 0, "Units": set()}
+                move_map[move_key] = {
+                    "Step": len(move_map) + 1,
+                    "account_id": account["account_id"],
+                    "account_name": account["account_name"],
+                    "account_display": account["account_display"],
+                    "Account": account["account_display"],
+                    "Shards Used": 0,
+                    "Gold Used": 0,
+                    "Levels": 0,
+                    "Units": set(),
+                }
             move_map[move_key]["Shards Used"] += cost.shards
             move_map[move_key]["Gold Used"] += cost.gold
             move_map[move_key]["Levels"] += 1
@@ -279,7 +297,7 @@ def build_multi_account_upgrade_plan(
     remaining_shards = max(available_shards - total_used_shards, 0)
     remaining_golds = max(available_golds - total_used_golds, 0)
     completed = all(unit["completed"] for unit in clean_units)
-    used_account_names = {row["account_name"] for row in allocation_rows}
+    used_account_ids = {row["account_id"] for row in allocation_rows}
 
     unit_summary = [
         {
@@ -299,10 +317,12 @@ def build_multi_account_upgrade_plan(
 
     skipped_rows = []
     for account in selected_accounts:
-        if account["account_name"] in used_account_names:
+        if account["account_id"] in used_account_ids:
             continue
         skipped_rows.append({
+            "account_id": account["account_id"],
             "account_name": account["account_name"],
+            "account_display": account["account_display"],
             "latest_shards": account["latest_shards"],
             "latest_golds": account["latest_golds"],
             "latest_wf": account["latest_wf"],
@@ -312,7 +332,7 @@ def build_multi_account_upgrade_plan(
     return {
         "summary": {
             "number_of_units": len(clean_units),
-            "account_jump_required": len(used_account_names),
+            "account_jump_required": len(used_account_ids),
             "enough_resource": completed,
             "required_shards": total_required_shards,
             "required_golds": total_required_golds,

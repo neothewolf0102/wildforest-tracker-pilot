@@ -66,6 +66,30 @@ class LevelJumpMatrixTest(unittest.TestCase):
         self.assertEqual(len(plan["allocation_detail"]), 3)
         self.assertEqual(plan["unit_summary"][0]["Max Reached"], 4)
 
+    def test_multi_account_plan_counts_duplicate_names_by_account_id(self) -> None:
+        accounts = [
+            {"account_id": "dup_1", "account_name": "Same", "note": "firm", "active": True},
+            {"account_id": "dup_2", "account_name": "Same", "note": "gmail", "active": True},
+        ]
+        snapshots = [
+            {"account_id": "dup_1", "gold": 100, "shards": 10, "wf": 0},
+            {"account_id": "dup_2", "gold": 100, "shards": 10, "wf": 0},
+        ]
+        plan = build_multi_account_upgrade_plan(
+            accounts,
+            snapshots,
+            [
+                {"unit_name": "Rogue", "current_level": 1, "target_level": 2},
+                {"unit_name": "Mage", "current_level": 1, "target_level": 2},
+            ],
+            LEVEL_CONFIG,
+            mode="Best Fit / Least Waste",
+        )
+
+        self.assertEqual(plan["summary"]["account_jump_required"], 2)
+        self.assertEqual({row["account_id"] for row in plan["allocation_detail"]}, {"dup_1", "dup_2"})
+        self.assertEqual({row["Account"] for row in plan["recommended_moves"]}, {"Same (firm)", "Same (gmail)"})
+
 
 if __name__ == "__main__":
     unittest.main()

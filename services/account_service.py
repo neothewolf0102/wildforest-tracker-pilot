@@ -47,12 +47,13 @@ def upsert_account(
     note: str = "",
     account_id: str | None = None,
     bypass_account_limit: bool = False,
+    allow_blank_wallet: bool = False,
 ) -> dict:
     clean_name = _normalize_text(account_name)
     clean_wallet = _normalize_text(wallet_address)
     if not clean_name:
         raise ValueError("Account name is required.")
-    if not clean_wallet:
+    if not clean_wallet and not allow_blank_wallet:
         raise ValueError("Wallet address is required.")
 
     accounts = load_accounts(store)
@@ -62,7 +63,10 @@ def upsert_account(
 
     validate_account_unique(accounts, clean_name, clean_wallet, account_id)
 
+    # Keep extra fields (e.g. source/telegram_name from Telegram sync) when editing.
+    previous = accounts[existing_index] if existing_index is not None else {}
     account = {
+        **previous,
         "account_id": account_id or str(uuid4()),
         "account_name": clean_name,
         "wallet_address": clean_wallet,

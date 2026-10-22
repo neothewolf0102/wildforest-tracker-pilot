@@ -65,8 +65,7 @@ def latest_snapshot_by_account(snapshots: list[dict]) -> dict[str, dict]:
     return latest
 
 
-def upsert_manual_resource_snapshot(
-    store,
+def build_resource_snapshot(
     account_id: str,
     gold: int,
     shards: int,
@@ -75,9 +74,8 @@ def upsert_manual_resource_snapshot(
     source: str = "manual",
     raw_paste_text: str = "",
 ) -> dict:
-    snapshots = load_resource_snapshots(store)
     timestamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    snapshot = {
+    return {
         "snapshot_id": str(uuid4()),
         "account_id": account_id,
         "snapshot_datetime": timestamp,
@@ -93,6 +91,27 @@ def upsert_manual_resource_snapshot(
         "created_at": timestamp,
         "note": note.strip(),
     }
-    snapshots.append(snapshot)
+
+
+def append_resource_snapshots(store, new_snapshots: list[dict]) -> None:
+    """Append several snapshots with a single save (one Drive write)."""
+    if not new_snapshots:
+        return
+    snapshots = load_resource_snapshots(store)
+    snapshots.extend(new_snapshots)
     store.save_json(RESOURCES_FILE, snapshots)
+
+
+def upsert_manual_resource_snapshot(
+    store,
+    account_id: str,
+    gold: int,
+    shards: int,
+    wf: float,
+    note: str = "",
+    source: str = "manual",
+    raw_paste_text: str = "",
+) -> dict:
+    snapshot = build_resource_snapshot(account_id, gold, shards, wf, note, source, raw_paste_text)
+    append_resource_snapshots(store, [snapshot])
     return snapshot

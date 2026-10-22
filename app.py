@@ -22,6 +22,18 @@ from services.level_service import (
 )
 from services.mobile_ocr_service import MOBILE_OCR_LAYOUT_PROFILES, parse_mobile_ocr_paste
 from services.resource_service import latest_snapshot_by_account, load_resource_snapshots, upsert_manual_resource_snapshot
+from services.telegram_sync_service import (
+    ACTION_CREATE,
+    ACTION_LABELS,
+    ACTION_UPDATE,
+    DEFAULT_BOT_API_URL,
+    TelegramSyncError,
+    apply_telegram_import,
+    fetch_bot_accounts,
+    load_link_code,
+    plan_telegram_import,
+    save_link_code,
+)
 from services.ticket_service import load_tickets, ticket_by_account, upsert_ticket
 from ui.pilot_auth import current_store, current_user_email, is_super_admin, render_login_gate, render_user_bar
 
@@ -349,12 +361,13 @@ def validate_account_form(
     wallet_address: str,
     selected_account_id: str,
     bypass_account_limit: bool = False,
+    allow_blank_wallet: bool = False,
 ) -> str | None:
     clean_name = normalize_account_text(account_name)
     clean_wallet = normalize_account_text(wallet_address)
     if not clean_name:
         return "Account name is required."
-    if not clean_wallet:
+    if not clean_wallet and not allow_blank_wallet:
         return "Wallet address is required."
     if not selected_account_id and not bypass_account_limit and len(accounts) >= MAX_ACCOUNTS_PER_USER:
         return ACCOUNT_LIMIT_MESSAGE
@@ -364,7 +377,7 @@ def validate_account_form(
         account_id = str(account.get("account_id", ""))
         if selected_account_id and account_id == str(selected_account_id):
             continue
-        if normalize_account_key(account.get("wallet_address", "")) == wallet_key:
+        if wallet_key and normalize_account_key(account.get("wallet_address", "")) == wallet_key:
             return "Wallet address already exists. One wallet can only map to one account."
     return None
 
@@ -459,12 +472,15 @@ with tab_map["Account setup"]:
                 disabled=(not is_editing and account_limit_reached),
             )
             if submitted:
+                # Accounts imported from the Telegram bot have no wallet yet; allow keeping it blank.
+                allow_blank_wallet = bool(is_editing and selected_account and selected_account.get("source") == "telegram")
                 validation_error = validate_account_form(
                     accounts,
                     account_name,
                     wallet_address,
                     st.session_state.get("account_selected_id", ""),
                     bypass_account_limit=super_admin,
+                    allow_blank_wallet=allow_blank_wallet,
                 )
                 if validation_error:
                     st.error(validation_error)
@@ -478,6 +494,7 @@ with tab_map["Account setup"]:
                             note,
                             account_id=st.session_state.get("account_selected_id") or None,
                             bypass_account_limit=super_admin,
+                            allow_blank_wallet=allow_blank_wallet,
                         )
                         queue_account_reset("Account saved.")
                         st.rerun()
@@ -511,6 +528,63 @@ with tab_map["Account setup"]:
         st.dataframe(pd.DataFrame(account_rows), use_container_width=True, hide_index=True)
     else:
         st.info("No accounts yet.")
+
+    with st.expander("🔄 Đồng bộ từ Telegram bot", expanded=bool(st.session_state.get("tg_sync_preview"))):
+        st.caption(
+            "Kéo acc + shards/gold đã nhập trong Telegram bot vào webapp. "
+            "Gõ /lienket trong bot để lấy mã. Acc mới tạo từ bot để trống ví; WF giữ số cũ (acc mới = 0)."
+        )
+        try:
+            bot_api_url = str(st.secrets.get("TELEGRAM_BOT_API_URL", DEFAULT_BOT_API_URL))
+        except Exception:
+            bot_api_url = DEFAULT_BOT_API_URL
+        saved_code = load_link_code(store)
+        tg_code = st.text_input("Mã liên kết", value=saved_code, type="password", key="tg_sync_code", placeholder="WF-...")
+        if st.button("Lấy dữ liệu", key="tg_sync_fetch"):
+            try:
+                bot_accounts = fetch_bot_accounts(bot_api_url, tg_code)
+                if tg_code.strip() != saved_code:
+                    save_link_code(store, tg_code)
+                max_new = None if super_admin else max(MAX_ACCOUNTS_PER_USER - len(accounts), 0)
+                st.session_state["tg_sync_preview"] = plan_telegram_import(accounts, snapshot_map, bot_accounts, max_new)
+                if not bot_accounts:
+                    st.info("Bot chưa có acc nào. Nhập trong bot bằng /acc.")
+            except TelegramSyncError as error:
+                st.session_state.pop("tg_sync_preview", None)
+                st.error(str(error))
+
+        preview_rows = st.session_state.get("tg_sync_preview") or []
+        if preview_rows:
+            def _fmt_change(old: object, new: object) -> str:
+                return f"{new:,}" if old is None else (f"{old:,}" if old == new else f"{old:,} → {new:,}")
+
+            st.dataframe(
+                pd.DataFrame([
+                    {
+                        "Acc (Telegram)": row["telegram_name"],
+                        "Acc (webapp)": row["account_name"] if row["action"] != ACTION_CREATE else "—",
+                        "Hành động": ACTION_LABELS.get(row["action"], row["action"]),
+                        "Shards": _fmt_change(row["shards_old"], row["shards_new"]),
+                        "Gold": _fmt_change(row["gold_old"], row["gold_new"]),
+                    }
+                    for row in preview_rows
+                ]),
+                use_container_width=True,
+                hide_index=True,
+            )
+            pending = sum(1 for row in preview_rows if row["action"] in (ACTION_CREATE, ACTION_UPDATE))
+            sync_cols = st.columns(2)
+            if sync_cols[0].button(f"Xác nhận nhập ({pending})", type="primary", disabled=pending == 0, key="tg_sync_confirm"):
+                result = apply_telegram_import(store, preview_rows)
+                st.session_state.pop("tg_sync_preview", None)
+                st.session_state["account_flash_message"] = (
+                    f"Đã đồng bộ từ Telegram: {result['created']} acc mới, {result['updated']} acc cập nhật resource."
+                )
+                st.session_state["account_flash_type"] = "success"
+                st.rerun()
+            if sync_cols[1].button("Hủy", key="tg_sync_cancel"):
+                st.session_state.pop("tg_sync_preview", None)
+                st.rerun()
 
     st.divider()
     st.subheader("Resource Snapshot")

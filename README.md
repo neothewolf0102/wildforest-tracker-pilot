@@ -37,3 +37,13 @@ python -m streamlit run app.py
 Add the values from `.streamlit/secrets.toml.example` to Streamlit Community Cloud secrets. Do not commit real secrets, OAuth tokens, local user data, generated QA reports, or backup snapshots.
 
 See `docs/streamlit_cloud_pilot01.md` for deployment and acceptance-test details.
+
+## Telegram bot sync
+
+Account setup has a **🔄 Đồng bộ từ Telegram bot** panel that pulls accounts and shards/gold entered in the Wildforest Telegram bot.
+
+1. In the bot, send `/lienket` to get a code (`WF-...`). `/lienket` again rotates it, `/lienket huy` revokes it.
+2. Paste the code in the panel → **Lấy dữ liệu** → review the preview → **Xác nhận nhập**. Nothing is written before confirming.
+3. Accounts are matched by Telegram name (then account name). New accounts are created with a blank wallet and `source: telegram`; their wallet can stay blank when editing. Each change is saved as a resource snapshot with `source: telegram`; WF keeps the latest value (0 for new accounts). Non-admin users still respect the 5-account limit.
+
+Optional secret: `TELEGRAM_BOT_API_URL` (defaults to `https://wildforest-shards-bot.firmstoney.workers.dev`).
